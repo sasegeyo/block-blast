@@ -11,6 +11,7 @@ import {
   applyHammerBooster,
   applyBombBlastBooster,
   getCampaignStageConfig,
+  getProjectedClearLines,
   hasAnyValidMove,
   TrayPiece,
 } from './rules';
@@ -176,4 +177,29 @@ test('500-stage campaign generator produces valid configurations up to stage 500
   assert.equal(s500.stageNumber, 500);
   assert.ok(s500.objectives[0].target > s1.objectives[0].target);
   assert.equal(hasAnyValidMove(createBoard(s1.architecture), []), true);
+});
+
+test('getProjectedClearLines accurately predicts row and column clears on hover', () => {
+  const board = createBoard('standard');
+  for (let c = 0; c < 6; c++) {
+    board[2][c] = {
+      row: 2,
+      col: c,
+      kind: 'normal',
+      color: 'emerald',
+      frozenLayers: 0,
+      bombTimer: 0,
+    };
+  }
+  const duoH: TrayPiece = {
+    id: 'duo',
+    name: 'Duo H',
+    matrix: [[1, 1]],
+    color: 'emerald',
+    modifiers: [],
+    used: false,
+  };
+  const proj = getProjectedClearLines(board, duoH, 2, 6);
+  assert.deepEqual(proj.rows, [2]);
+  assert.deepEqual(proj.cols, []);
 });

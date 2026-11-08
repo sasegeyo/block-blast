@@ -86,6 +86,8 @@ export interface PlacementResult {
   bombsDefused: number;
   bombsDetonated: number;
   wildcardsTriggered: number;
+  fullRows: number[];
+  fullCols: number[];
   clearedCells: Array<{ row: number; col: number; color: BlockColor }>;
   events: PlacementEvent[];
 }
@@ -430,6 +432,68 @@ export function shiftBoardRowRight(board: GridCell[][], rowIndex: number): GridC
 }
 
 /**
+ * Computes which rows and columns would complete and clear if `piece` is placed at `(anchorRow, anchorCol)`.
+ */
+export function getProjectedClearLines(
+  board: GridCell[][],
+  piece: TrayPiece,
+  anchorRow: number,
+  anchorCol: number
+): { rows: number[]; cols: number[] } {
+  if (!canPlacePiece(board, piece, anchorRow, anchorCol)) {
+    return { rows: [], cols: [] };
+  }
+
+  const occupied = new Set<string>();
+  for (let dr = 0; dr < piece.matrix.length; dr++) {
+    for (let dc = 0; dc < piece.matrix[0].length; dc++) {
+      if (piece.matrix[dr][dc] === 1) {
+        occupied.add(`${anchorRow + dr},${anchorCol + dc}`);
+      }
+    }
+  }
+
+  const rows: number[] = [];
+  const cols: number[] = [];
+
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    let playableCount = 0;
+    let filledCount = 0;
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      const kind = board[r][c].kind;
+      if (kind !== 'void') {
+        playableCount++;
+        if (kind !== 'empty' || occupied.has(`${r},${c}`)) {
+          filledCount++;
+        }
+      }
+    }
+    if (playableCount > 0 && filledCount === playableCount) {
+      rows.push(r);
+    }
+  }
+
+  for (let c = 0; c < BOARD_SIZE; c++) {
+    let playableCount = 0;
+    let filledCount = 0;
+    for (let r = 0; r < BOARD_SIZE; r++) {
+      const kind = board[r][c].kind;
+      if (kind !== 'void') {
+        playableCount++;
+        if (kind !== 'empty' || occupied.has(`${r},${c}`)) {
+          filledCount++;
+        }
+      }
+    }
+    if (playableCount > 0 && filledCount === playableCount) {
+      cols.push(c);
+    }
+  }
+
+  return { rows, cols };
+}
+
+/**
  * Places a piece onto the board and resolves Wildcard conversions, Line Clears,
  * Frozen block layer cracking/shattering, Bomb countdowns/detonations, and Shifting rows.
  */
@@ -458,6 +522,8 @@ export function placePieceOnBoard(
       bombsDefused: 0,
       bombsDetonated: 0,
       wildcardsTriggered: 0,
+      fullRows: [],
+      fullCols: [],
       clearedCells: [],
       events: [],
     };
@@ -734,6 +800,8 @@ export function placePieceOnBoard(
     bombsDefused,
     bombsDetonated,
     wildcardsTriggered,
+    fullRows,
+    fullCols,
     clearedCells,
     events,
   };

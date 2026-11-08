@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BOARD_SIZE,
   BoosterType,
   GameMode,
   GridArchitecture,
@@ -64,7 +63,6 @@ interface FrozenRunSummary {
 }
 
 export default function App() {
-  // Check ?autostart=1 query param
   const initialShellState = useMemo<ShellState>(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
@@ -97,7 +95,7 @@ export default function App() {
   const [objectives, setObjectives] = useState<StageObjective[]>([]);
   const [lastChanceUsed, setLastChanceUsed] = useState<boolean>(false);
   const [statusBannerText, setStatusBannerText] = useState<string>(
-    'Select a piece [1-3] and place on the Relic Grid to clear lines!'
+    'Drag or tap a piece [1-3] onto the carved sockets to clear lines!'
   );
   const [burstSignal, setBurstSignal] = useState<CanvasParticleBurst | null>(null);
 
@@ -140,12 +138,10 @@ export default function App() {
 
   const burstIdCounterRef = useRef<number>(1);
 
-  // Sync document.body.dataset.state on every shellState transition
   useEffect(() => {
     document.body.dataset.state = shellState;
   }, [shellState]);
 
-  // Derived League Cohort & Rank
   const leagueCohort = useMemo(
     () => createInitialLeagueCohort(weeklyLeagueBaseScore + score),
     [weeklyLeagueBaseScore, score]
@@ -157,7 +153,6 @@ export default function App() {
 
   const { currentStreak } = useMemo(() => computeCalendarStreak(calendar), [calendar]);
 
-  // Start / Reset a Game Run for a specified mode
   const startNewRun = useCallback(
     (
       targetMode: GameMode = gameMode,
@@ -213,7 +208,7 @@ export default function App() {
         setStatusBannerText('Time Attack Blitz: Clear lines & combos for +4s/+8s bonus time!');
       } else {
         setStatusBannerText(
-          `Classic Endless (${chosenArch.replace('_', ' ')}) · Clear lines & defuse bombs!`
+          `Classic Endless (${chosenArch.replace('_', ' ')}) · Drag or tap pieces to clear lines!`
         );
       }
 
@@ -243,7 +238,6 @@ export default function App() {
     const timer = window.setInterval(() => {
       setBlitzSecondsLeft((prev) => {
         if (prev <= 1) {
-          // Time expired -> freeze summary & trigger Game Over
           soundSynth.playGameOver();
           setFrozenSummary({
             outcome: 'defeat',
@@ -290,11 +284,13 @@ export default function App() {
 
       if (!result.valid) return;
 
-      // Audio & Visual Juice
+      // Audio & Haptic Feedback
       if (result.bombsDetonated > 0) {
         soundSynth.playBombDetonate();
       } else if (result.bombsDefused > 0) {
         soundSynth.playBombDefuse();
+      } else if (result.iceShattered > 0) {
+        soundSynth.playHammerSmash();
       } else if (result.linesCleared > 0) {
         soundSynth.playLineClear(result.linesCleared, result.comboCount);
       } else if (result.events.some((e) => e.type === 'frost_crack')) {
@@ -303,24 +299,48 @@ export default function App() {
         soundSynth.playPlace();
       }
 
-      // Emit particle burst on cleared cells or placed piece cells
+      const placedCellsList = piece.matrix.flatMap((rArr, dr) =>
+        rArr
+          .map((val, dc) =>
+            val === 1 ? { row: row + dr, col: col + dc, color: piece.color } : null
+          )
+          .filter((x): x is { row: number; col: number; color: typeof piece.color } => x !== null)
+      );
+
       const burstCells =
-        result.clearedCells.length > 0
-          ? result.clearedCells
-          : piece.matrix.flatMap((rArr, dr) =>
-              rArr
-                .map((val, dc) =>
-                  val === 1 ? { row: row + dr, col: col + dc, color: piece.color } : null
-                )
-                .filter((x): x is { row: number; col: number; color: typeof piece.color } => x !== null)
-            );
+        result.clearedCells.length > 0 ? result.clearedCells : placedCellsList;
+
+      // Energetic Floating Combo Banners
+      let secondaryBanner: string | undefined;
+      if (result.linesCleared >= 3) {
+        secondaryBanner = 'RELIC CASCADE!';
+      } else if (result.linesCleared === 2) {
+        secondaryBanner = 'MAGNIFICENT!';
+      } else if (result.comboCount >= 2) {
+        secondaryBanner = `COMBO x${result.comboCount}!`;
+      } else if (result.wildcardsTriggered > 0) {
+        secondaryBanner = 'PRISM SURGE!';
+      }
 
       burstIdCounterRef.current += 1;
       setBurstSignal({
         id: burstIdCounterRef.current,
         cells: burstCells,
-        intensity: result.linesCleared > 0 || result.bombsDetonated > 0 ? 'heavy' : 'light',
+        placedCells: placedCellsList.map((c) => ({ row: c.row, col: c.col })),
+        fullRows: result.fullRows,
+        fullCols: result.fullCols,
+        ringCenter:
+          result.bombsDefused > 0 || result.bombsDetonated > 0 || result.wildcardsTriggered > 0
+            ? { row, col }
+            : undefined,
+        intensity:
+          result.linesCleared >= 2 || result.bombsDetonated > 0
+            ? 'heavy'
+            : result.linesCleared === 1 || result.wildcardsTriggered > 0
+              ? 'medium'
+              : 'light',
         calloutText: result.events[0]?.message,
+        secondaryBannerText: secondaryBanner,
       });
 
       if (result.events.length > 0) {
@@ -346,20 +366,17 @@ export default function App() {
         setBlitzSecondsLeft((prev) => prev + result.timeBonusSec);
       }
 
-      // Mark piece as used or deal fresh 3-piece tray if all 3 used
       let updatedTray = tray.map((p, idx) => (idx === pieceIndex ? { ...p, used: true } : p));
       if (updatedTray.every((p) => p.used)) {
         updatedTray = generateTrayPieces(2026 + nextTurnNum * 131, gameMode, nextTurnNum);
       }
       setTray(updatedTray);
 
-      // Auto-select next available piece in tray
       const nextAvailableIdx = updatedTray.findIndex((p) => !p.used);
       if (nextAvailableIdx >= 0) {
         setSelectedPieceIndex(nextAvailableIdx);
       }
 
-      // Update Objectives for Daily & Campaign modes
       let updatedObjectives = objectives;
       if (gameMode === 'daily' || gameMode === 'campaign') {
         updatedObjectives = objectives.map((obj) => {
@@ -389,7 +406,6 @@ export default function App() {
         setMovesRemaining(nextMovesLeft);
       }
 
-      // Check Victory Condition (Daily or Campaign objectives met)
       const allObjectivesComplete =
         updatedObjectives.length > 0 &&
         updatedObjectives.every((o) => o.current >= o.target);
@@ -425,7 +441,6 @@ export default function App() {
         return;
       }
 
-      // Check Defeat Conditions: Out of moves (in Daily/Campaign) OR no valid move for any remaining tray piece
       const noMovesLeft =
         (gameMode === 'daily' || gameMode === 'campaign') && nextMovesLeft <= 0;
       const boardBlocked = !hasAnyValidMove(result.board, updatedTray);
@@ -466,13 +481,13 @@ export default function App() {
     ]
   );
 
-  // Consume booster helper (enforces anti-pay-to-win session cap & compounding coin cost)
+  // Consume booster helper
   const tryConsumeBooster = useCallback(
     (type: BoosterType): boolean => {
       const usedThisSession = boosterUsesSession[type];
       if (usedThisSession >= MAX_BOOSTER_USES_PER_SESSION) {
         setStatusBannerText(
-          `Anti-Pay-to-Win Limit: ${type.toUpperCase()} already used ${MAX_BOOSTER_USES_PER_SESSION}/${MAX_BOOSTER_USES_PER_SESSION} times this session!`
+          `Anti-Pay-to-Win Cap: ${type.toUpperCase()} used ${MAX_BOOSTER_USES_PER_SESSION}/3 times this session!`
         );
         return false;
       }
@@ -552,8 +567,8 @@ export default function App() {
         setActiveTargetingBooster((prev) => (prev === booster ? null : booster));
         setStatusBannerText(
           booster === 'hammer'
-            ? 'Hammer Armed: Click or press Space on any occupied block to shatter it!'
-            : '3x3 Bomb Armed: Click or press Space on the board to clear a 3x3 sector!'
+            ? 'Hammer Armed: Tap any occupied block on the grid to shatter it!'
+            : '3x3 Bomb Armed: Tap the grid to detonate a 3x3 sector!'
         );
       }
     },
@@ -574,13 +589,14 @@ export default function App() {
           setActiveTargetingBooster(null);
           return;
         }
-        soundSynth.playBooster();
+        soundSynth.playHammerSmash();
         setBoard(res.board);
         setActiveTargetingBooster(null);
         burstIdCounterRef.current += 1;
         setBurstSignal({
           id: burstIdCounterRef.current,
           cells: [{ row, col, color: res.shatteredCell.color }],
+          ringCenter: { row, col },
           intensity: 'heavy',
           calloutText: 'HAMMER SMASH!',
         });
@@ -602,6 +618,7 @@ export default function App() {
         setBurstSignal({
           id: burstIdCounterRef.current,
           cells: res.clearedCells,
+          ringCenter: { row, col },
           intensity: 'heavy',
           calloutText: `3x3 BLAST (-${res.clearedCount} BLOCKS)`,
         });
@@ -611,14 +628,12 @@ export default function App() {
     [activeTargetingBooster, board, tryConsumeBooster]
   );
 
-  // F2P One-Time "Last Chance Continue" on Defeat (Clears 3x3 Center + Deals 3 Fresh Pieces)
+  // F2P One-Time "Last Chance Continue" on Defeat
   const handleLastChanceContinue = useCallback(() => {
     if (lastChanceUsed) return;
     setLastChanceUsed(true);
     const res = applyBombBlastBooster(board, 3, 3);
-    const clearedBoard = res.board;
-    // Also clear (4,4) neighborhood so center is wide open
-    const res2 = applyBombBlastBooster(clearedBoard, 4, 4);
+    const res2 = applyBombBlastBooster(res.board, 4, 4);
     const nextTurn = turnIndex + 1;
     setBoard(res2.board);
     setTray(generateTrayPieces(2026 + nextTurn * 509, gameMode, nextTurn));
@@ -743,18 +758,18 @@ export default function App() {
         onToggleMute={handleToggleMute}
       />
 
-      {/* 2. TITLE SCREEN STAGE (35-40% Left Negative-Space Lockup + Live Showcase on Right) */}
+      {/* 2. TITLE SCREEN STAGE */}
       {shellState === 'title' && (
         <section
           aria-label="Title Screen"
           className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-6 md:p-12"
         >
-          <div className="max-w-xl w-full my-auto pointer-events-auto space-y-6 bg-[#07130F]/92 p-6 md:p-8 rounded-2xl border-2 border-[#D99B26]/70 shadow-2xl">
+          <div className="max-w-xl w-full my-auto pointer-events-auto space-y-6 bg-[#07130F]/94 p-6 md:p-8 rounded-2xl border-2 border-[#D99B26]/75 shadow-2xl">
             <RelicTitleEmblem className="w-full max-w-md" />
 
             <p className="text-sm text-emerald-100/85 leading-relaxed">
-              Master ancient variable grids with multi-layer Frozen Relics, countdown Bomb threats,
-              and 3x3 Wildcard surges. Climb your 30-player Weekly League cohort and complete
+              Master carved runic grids with multi-layer Frozen Relics, pulsating Bomb fuses, and
+              prismatic Wildcard surges. Climb your 30-player Weekly League cohort and complete
               November&apos;s 30-piece Mystic Forest mosaic.
             </p>
 
@@ -845,195 +860,222 @@ export default function App() {
             </div>
           </div>
 
-          {/* Flat Single-Line Control Hint in Bottom Safe Margin */}
           <div className="text-xs text-emerald-200/80 font-mono-tabular tracking-wide">
-            1-3 Select Piece · Mouse or WASD/Arrows Place · Space Confirm · R Rotate · H Hammer · F Reroll · Esc Pause
+            1-3 Select Piece · Drag or WASD/Arrows Place · Space Confirm · R Rotate · H Hammer · F Reroll · Esc Pause
           </div>
         </section>
       )}
 
-      {/* 3. PLAYING PERIMETER HUD (>= 85% Unobstructed Playfield, Pointer Pass-Through) */}
+      {/* 3. MOBILE-FIRST VERTICALLY STACKED GAMEPLAY SHELL (Top HUD -> Board/Tray -> Bottom Booster Bar) */}
       {shellState !== 'title' && (
-        <div className="fixed inset-0 z-10 pointer-events-none flex flex-col justify-between p-3 md:p-5">
-          {/* Top Perimeter Strip */}
-          <div className="flex items-start justify-between gap-4">
-            {/* Top-Left Cluster: Hero Score, Combo, Best & Mode Kicker */}
-            <div className="pointer-events-auto flex items-center gap-5 px-4 py-2.5 rounded-xl bg-[#081611]/92 border border-[#D99B26]/50 shadow-lg">
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-widest text-amber-300/85">
-                  SCORE
-                </div>
-                <div
-                  data-testid="hud-score"
-                  className="text-2xl md:text-3xl font-extrabold text-amber-300 hud-numeral leading-none mt-0.5"
+        <div className="fixed inset-0 z-10 pointer-events-none flex flex-col justify-between items-center px-2.5 py-2 sm:py-3">
+          {/* STREAMLINED TOP HUD (Centered Mobile Container) */}
+          <header className="w-full max-w-[460px] pointer-events-auto flex flex-col gap-1.5 bg-[#07140F]/95 px-2.5 sm:px-3.5 py-2 rounded-2xl border border-[#D99B26]/55 shadow-xl">
+            {/* Top Sub-Row: Currencies, Sanctuary Hub Triggers & Settings/Pause Controls */}
+            <div className="flex items-center justify-between gap-1 border-b border-[#18382C] pb-1.5">
+              {/* Compact Currency & Streak Readout */}
+              <div className="flex items-center gap-1 sm:gap-1.5 text-[11px] sm:text-xs font-mono-tabular shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setActiveModal('shop')}
+                  className="flex items-center gap-0.5 text-amber-300 font-bold hover:text-amber-200 cursor-pointer"
+                  title="Soft Currency (Coins) · Open Relic Shop"
                 >
-                  {Math.round(score)}
-                </div>
-              </div>
-
-              <div className="h-8 w-px bg-[#1D4033]" />
-
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-300/80">
-                  BEST
-                </div>
-                <div className="text-lg font-bold text-emerald-100 hud-numeral leading-none mt-0.5">
-                  {Math.round(bestScore)}
-                </div>
-              </div>
-
-              <div className="h-8 w-px bg-[#1D4033]" />
-
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-widest text-amber-200/80">
-                  COMBO
-                </div>
-                <div className="text-lg font-bold text-amber-400 hud-numeral leading-none mt-0.5">
-                  {comboStreak}x
-                </div>
-              </div>
-            </div>
-
-            {/* Top-Center Cluster: Mode Objectives / Timer / Moves */}
-            <div className="pointer-events-auto hidden sm:flex items-center gap-4 px-4 py-2 rounded-xl bg-[#081611]/92 border border-[#1D4033] shadow-lg">
-              <div className="flex items-center gap-2 text-xs whitespace-nowrap">
-                <span className="font-bold text-amber-300 uppercase tracking-wide">
-                  {gameMode === 'classic' && 'Classic Endless'}
-                  {gameMode === 'daily' && 'Nov 8 Daily Puzzle'}
-                  {gameMode === 'blitz' && 'Time Attack Blitz'}
-                  {gameMode === 'campaign' && `Campaign Stage ${currentCampaignStage}/500`}
-                </span>
-                <span className="text-emerald-400/60" aria-hidden="true">·</span>
-                <span className="text-emerald-200/85 capitalize">
-                  {architecture.replace('_', ' ')} Grid
-                </span>
-              </div>
-
-              {(gameMode === 'daily' || gameMode === 'campaign') && (
-                <>
-                  <div className="h-6 w-px bg-[#1D4033]" />
-                  <div className="flex items-center gap-3 text-xs font-mono-tabular">
-                    <span className="text-amber-300 font-bold">Moves: {movesRemaining}</span>
-                    {objectives.map((obj, idx) => (
-                      <span key={idx} className="text-emerald-200">
-                        {obj.label}: {obj.current}/{obj.target}
-                      </span>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {gameMode === 'blitz' && (
-                <>
-                  <div className="h-6 w-px bg-[#1D4033]" />
-                  <div className="text-sm font-mono-tabular font-bold text-amber-300">
-                    Timer: {Math.round(blitzSecondsLeft)}s
-                  </div>
-                </>
-              )}
-            </div>
-
-            {/* Top-Right Cluster: Currencies, League Rank & Square SVG Utility Controls */}
-            <div className="pointer-events-auto flex items-center gap-2.5">
-              <div className="flex items-center gap-3 px-3.5 py-2 rounded-xl bg-[#081611]/92 border border-[#1D4033] text-xs font-mono-tabular">
-                <div className="flex items-center gap-1 text-amber-300 font-bold" title="Soft Currency (Coins)">
-                  <CoinIcon className="w-4 h-4" />
+                  <CoinIcon className="w-3.5 h-3.5 shrink-0" />
                   <span data-testid="hud-coins">{Math.round(coins)}</span>
-                </div>
-                <span className="text-emerald-600">·</span>
-                <div className="flex items-center gap-1 text-purple-300 font-bold" title="Hard Currency (Gems)">
-                  <GemIcon className="w-4 h-4" />
+                </button>
+                <span className="text-emerald-700" aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  onClick={() => setActiveModal('shop')}
+                  className="flex items-center gap-0.5 text-purple-300 font-bold hover:text-purple-200 cursor-pointer"
+                  title="Hard Currency (Gems)"
+                >
+                  <GemIcon className="w-3.5 h-3.5 shrink-0" />
                   <span data-testid="hud-gems">{Math.round(gems)}</span>
-                </div>
-                <span className="text-emerald-600">·</span>
-                <div className="flex items-center gap-1 text-orange-300 font-bold" title="Daily Login Streak">
-                  <FlameStreakIcon className="w-4 h-4" />
+                </button>
+                <span className="text-emerald-700" aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  onClick={() => setActiveModal('daily')}
+                  className="flex items-center gap-0.5 text-orange-300 font-bold hover:text-orange-200 cursor-pointer"
+                  title="Daily Login Streak & Mosaic"
+                >
+                  <FlameStreakIcon className="w-3.5 h-3.5 shrink-0" />
                   <span>{currentStreak}d</span>
+                </button>
+              </div>
+
+              {/* Compact Meta Hub Pills (Daily, Campaign, League, Shop) */}
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setActiveModal('daily')}
+                  aria-label={`Daily Mosaic ${currentStreak}d Streak`}
+                  className="flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-md bg-[#0D231B] hover:bg-[#153529] border border-[#1E4435] text-[10px] sm:text-[11px] font-semibold text-emerald-100 cursor-pointer transition-colors whitespace-nowrap"
+                >
+                  <CalendarIcon className="hidden sm:block w-3 h-3 shrink-0" />
+                  <span>Daily</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveModal('campaign')}
+                  aria-label={`500 Campaigns Stage ${currentCampaignStage}`}
+                  className="flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-md bg-[#0D231B] hover:bg-[#153529] border border-[#1E4435] text-[10px] sm:text-[11px] font-semibold text-emerald-100 cursor-pointer transition-colors whitespace-nowrap"
+                >
+                  <MapIcon className="hidden sm:block w-3 h-3 shrink-0" />
+                  <span>Stg {currentCampaignStage}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveModal('league')}
+                  aria-label={`Weekly League Rank #${playerLeagueRank}`}
+                  className="flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-md bg-[#0D231B] hover:bg-[#153529] border border-[#1E4435] text-[10px] sm:text-[11px] font-semibold text-amber-200 cursor-pointer transition-colors whitespace-nowrap"
+                >
+                  <TrophyIcon className="hidden sm:block w-3 h-3 shrink-0" />
+                  <span>#{playerLeagueRank}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveModal('shop')}
+                  aria-label={`Relic Shop ${THEME_SKINS[equippedSkin].name}`}
+                  className="flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-md bg-[#0D231B] hover:bg-[#153529] border border-[#1E4435] text-[10px] sm:text-[11px] font-semibold text-amber-300 cursor-pointer transition-colors whitespace-nowrap"
+                >
+                  <ShopIcon className="hidden sm:block w-3 h-3 shrink-0" />
+                  <span>Shop</span>
+                </button>
+              </div>
+
+              {/* Compact Utility Controls: Mute [M], Pause [P], Restart */}
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  aria-label={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    handleToggleMute();
+                  }}
+                  className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-md bg-[#0D231B] hover:bg-[#16382B] border border-[#1E4435] cursor-pointer transition-colors"
+                >
+                  <MuteIcon muted={isMuted} className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  aria-label="Pause Game"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    handleTogglePause();
+                  }}
+                  className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-md bg-[#0D231B] hover:bg-[#16382B] border border-[#1E4435] cursor-pointer transition-colors"
+                >
+                  <PauseIcon className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  aria-label="Restart Run"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    startNewRun(gameMode, architecture, currentCampaignStage);
+                  }}
+                  className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-md bg-[#0D231B] hover:bg-[#16382B] border border-[#1E4435] cursor-pointer transition-colors"
+                >
+                  <RestartIcon className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Bottom Sub-Row: Glowing Hero Score, High Score / Best, Combo & Mode Objective Indicator */}
+            <div className="flex items-center justify-between gap-3 pt-0.5">
+              <div className="flex items-center gap-4">
+                <div>
+                  <div className="text-[9px] font-bold uppercase tracking-widest text-amber-300/80">
+                    SCORE
+                  </div>
+                  <div
+                    data-testid="hud-score"
+                    className="text-2xl sm:text-3xl font-extrabold text-amber-300 hud-numeral leading-none"
+                  >
+                    {Math.round(score)}
+                  </div>
+                </div>
+
+                <div className="h-7 w-px bg-[#18382C]" />
+
+                <div>
+                  <div className="text-[9px] font-bold uppercase tracking-widest text-emerald-300/75">
+                    BEST
+                  </div>
+                  <div className="text-base font-bold text-emerald-100 hud-numeral leading-none mt-0.5">
+                    {Math.round(bestScore)}
+                  </div>
+                </div>
+
+                {comboStreak > 0 && (
+                  <>
+                    <div className="h-7 w-px bg-[#18382C]" />
+                    <div>
+                      <div className="text-[9px] font-bold uppercase tracking-widest text-amber-200">
+                        COMBO
+                      </div>
+                      <div className="text-base font-extrabold text-amber-400 hud-numeral leading-none mt-0.5">
+                        {comboStreak}x
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Mode / Stage Objective Indicator */}
+              <div className="text-right text-xs">
+                <div className="font-bold text-amber-200 uppercase tracking-wide text-[11px]">
+                  {gameMode === 'classic' && `Classic · ${architecture.replace('_', ' ')}`}
+                  {gameMode === 'daily' && `Daily · ${movesRemaining} Moves Left`}
+                  {gameMode === 'blitz' && `Blitz · ${Math.round(blitzSecondsLeft)}s`}
+                  {gameMode === 'campaign' && `Stage ${currentCampaignStage} · ${movesRemaining}m`}
+                </div>
+                <div className="text-[11px] text-emerald-200/80 font-mono-tabular truncate max-w-[190px]">
+                  {(gameMode === 'daily' || gameMode === 'campaign') && objectives.length > 0
+                    ? objectives.map((o) => `${o.label.split(' ')[1] || o.label}: ${o.current}/${o.target}`).join(' · ')
+                    : `${THEME_SKINS[equippedSkin].name} · ${linesClearedRun} Lines`}
                 </div>
               </div>
-
-              {/* Compact Utility Icon Buttons: Mute [M], Pause [P], Restart [R] */}
-              <button
-                type="button"
-                tabIndex={-1}
-                aria-label={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  handleToggleMute();
-                }}
-                className="w-10 h-10 flex items-center justify-center rounded-xl bg-[#081611]/92 hover:bg-[#122A21] border border-[#1D4033] cursor-pointer transition-colors"
-              >
-                <MuteIcon muted={isMuted} className="w-5 h-5" />
-              </button>
-
-              <button
-                type="button"
-                tabIndex={-1}
-                aria-label="Pause Game"
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  handleTogglePause();
-                }}
-                className="w-10 h-10 flex items-center justify-center rounded-xl bg-[#081611]/92 hover:bg-[#122A21] border border-[#1D4033] cursor-pointer transition-colors"
-              >
-                <PauseIcon className="w-5 h-5" />
-              </button>
-
-              <button
-                type="button"
-                tabIndex={-1}
-                aria-label="Restart Run"
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  startNewRun(gameMode, architecture, currentCampaignStage);
-                }}
-                className="w-10 h-10 flex items-center justify-center rounded-xl bg-[#081611]/92 hover:bg-[#122A21] border border-[#1D4033] cursor-pointer transition-colors"
-              >
-                <RestartIcon className="w-5 h-5" />
-              </button>
             </div>
-          </div>
+          </header>
 
-          {/* Middle Left & Right Perimeter Docks (Clear of Central 35%-65% Board Area) */}
-          <div className="flex items-center justify-between my-auto">
-            {/* Left Dock: Strategic Boosters with Anti-Pay-to-Win Compounding Cost */}
-            <div
-              aria-label="Strategic Boosters Dock"
-              className="pointer-events-auto flex flex-col gap-2 bg-[#081611]/92 p-3 rounded-xl border border-[#D99B26]/45 shadow-lg w-56"
-            >
-              <div className="text-[10px] font-bold uppercase tracking-wider text-amber-300/90 px-1">
-                Boosters (Max 3/Run)
-              </div>
-
+          {/* DEDICATED BOTTOM BOOSTER BAR (Docked Horizontal Circular Action Buttons) */}
+          <footer
+            aria-label="Strategic Boosters Dock"
+            className="w-full max-w-[460px] pointer-events-auto flex flex-col items-center gap-1.5 bg-[#07140F]/95 px-4 py-2 rounded-2xl border border-[#D99B26]/55 shadow-xl"
+          >
+            <div className="w-full flex items-center justify-around gap-2">
               {(
                 [
                   {
                     type: 'rotate' as const,
                     label: 'Rotate',
-                    clue: 'Turn 90°',
                     keyHint: '[R]',
-                    icon: <RotateIcon className="w-5 h-5 shrink-0" />,
+                    icon: <RotateIcon className="w-5 h-5" />,
                   },
                   {
                     type: 'hammer' as const,
                     label: 'Hammer',
-                    clue: 'Smash 1 Cell',
                     keyHint: '[H]',
-                    icon: <HammerIcon className="w-5 h-5 shrink-0" />,
+                    icon: <HammerIcon className="w-5 h-5" />,
                   },
                   {
                     type: 'reroll' as const,
                     label: 'Refresh',
-                    clue: 'New 3 Shapes',
                     keyHint: '[F]',
-                    icon: <RerollIcon className="w-5 h-5 shrink-0" />,
+                    icon: <RerollIcon className="w-5 h-5" />,
                   },
                   {
                     type: 'bomb_blast' as const,
                     label: 'Bomb 3x3',
-                    clue: 'Clear Sector',
                     keyHint: '[B]',
-                    icon: <BombIcon className="w-5 h-5 shrink-0" />,
+                    icon: <BombIcon className="w-5 h-5" />,
                   },
                 ]
               ).map((b) => {
@@ -1049,113 +1091,59 @@ export default function App() {
                     type="button"
                     disabled={isMaxed}
                     onClick={() => handleActivateBoosterMode(b.type)}
-                    className={`flex items-center justify-between gap-2 p-2 rounded-lg border text-left transition-colors ${
-                      isArmed
-                        ? 'bg-amber-500/25 border-amber-300 text-amber-100 cursor-pointer'
-                        : isMaxed
-                          ? 'bg-[#06100C] border-[#132820] opacity-45 cursor-not-allowed'
-                          : 'bg-[#0D211A] hover:bg-[#143328] border-[#1D4033] text-emerald-100 cursor-pointer'
-                    }`}
+                    className="group flex flex-col items-center gap-0.5 cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
+                    <div
+                      className={`relative w-12 h-12 sm:w-13 sm:h-13 rounded-full flex items-center justify-center border-2 transition-transform group-hover:scale-105 group-active:scale-95 shadow-md ${
+                        isArmed
+                          ? 'bg-amber-500/30 border-amber-300 ring-2 ring-amber-400/50'
+                          : isMaxed
+                            ? 'bg-[#06100C] border-[#152E24]'
+                            : 'bg-gradient-to-b from-[#133227] to-[#0A1D16] border-[#D99B26]/70 group-hover:border-amber-300'
+                      }`}
+                    >
                       {b.icon}
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold leading-tight whitespace-nowrap">
-                          {b.label} <span className="font-mono-tabular text-amber-300">{b.keyHint}</span>
-                        </div>
-                        <div className="text-[10px] text-emerald-300/75 whitespace-nowrap">{b.clue}</div>
-                      </div>
+
+                      {/* Floating Stock or Compounding Coin Cost Badge */}
+                      <span
+                        className={`absolute -top-1 -right-1.5 px-1.5 py-0.2 rounded-full text-[10px] font-mono-tabular font-extrabold border shadow ${
+                          isMaxed
+                            ? 'bg-red-950 text-red-300 border-red-400/50'
+                            : stock > 0
+                              ? 'bg-emerald-600 text-white border-emerald-200'
+                              : 'bg-amber-500 text-slate-950 border-amber-200'
+                        }`}
+                      >
+                        {isMaxed ? 'CAP' : stock > 0 ? `x${stock}` : `${cost}c`}
+                      </span>
                     </div>
 
-                    <div className="text-right font-mono-tabular shrink-0">
-                      {isMaxed ? (
-                        <span className="text-[10px] text-red-300 font-bold">3/3 CAP</span>
-                      ) : stock > 0 ? (
-                        <span className="text-xs font-bold text-emerald-300">x{stock}</span>
-                      ) : (
-                        <span className="text-xs font-bold text-amber-300">{cost}c</span>
-                      )}
-                      <div className="text-[9px] text-emerald-200/50">{uses}/3 used</div>
+                    {/* Label + 3-Use Session Cap Dots */}
+                    <div className="flex items-center gap-1 mt-0.5">
+                      <span className="text-[10px] font-bold text-emerald-100 whitespace-nowrap">
+                        {b.label} <span className="text-amber-300 font-mono-tabular">{b.keyHint}</span>
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1" title={`${uses}/3 used this session`}>
+                      {[0, 1, 2].map((dotIdx) => (
+                        <span
+                          key={dotIdx}
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            dotIdx < uses ? 'bg-amber-400' : 'bg-emerald-900'
+                          }`}
+                        />
+                      ))}
                     </div>
                   </button>
                 );
               })}
             </div>
 
-            {/* Right Dock: Meta-Systems (Daily Calendar, 500 Campaign, 30-Cohort League, Relic Shop) */}
-            <div
-              aria-label="Sanctuary Meta Navigation"
-              className="pointer-events-auto flex flex-col gap-2 bg-[#081611]/92 p-3 rounded-xl border border-[#1D4033] shadow-lg w-56"
-            >
-              <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-300/90 px-1">
-                Sanctuary Hubs
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setActiveModal('daily')}
-                className="flex items-center gap-2.5 p-2 rounded-lg bg-[#0D211A] hover:bg-[#143328] border border-[#1D4033] text-left cursor-pointer transition-colors"
-              >
-                <CalendarIcon className="w-5 h-5 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-xs font-bold text-white whitespace-nowrap">Daily Mosaic</div>
-                  <div className="text-[10px] text-amber-300 font-mono-tabular whitespace-nowrap">
-                    {currentStreak}d Streak · Nov 2026
-                  </div>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveModal('campaign')}
-                className="flex items-center gap-2.5 p-2 rounded-lg bg-[#0D211A] hover:bg-[#143328] border border-[#1D4033] text-left cursor-pointer transition-colors"
-              >
-                <MapIcon className="w-5 h-5 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-xs font-bold text-white whitespace-nowrap">500 Campaigns</div>
-                  <div className="text-[10px] text-emerald-300 font-mono-tabular whitespace-nowrap">
-                    Stage {currentCampaignStage} / 500
-                  </div>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveModal('league')}
-                className="flex items-center gap-2.5 p-2 rounded-lg bg-[#0D211A] hover:bg-[#143328] border border-[#1D4033] text-left cursor-pointer transition-colors"
-              >
-                <TrophyIcon className="w-5 h-5 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-xs font-bold text-white whitespace-nowrap">Weekly League</div>
-                  <div className="text-[10px] text-amber-300 font-mono-tabular whitespace-nowrap">
-                    Rank #{playerLeagueRank} of 30
-                  </div>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveModal('shop')}
-                className="flex items-center gap-2.5 p-2 rounded-lg bg-[#0D211A] hover:bg-[#143328] border border-[#1D4033] text-left cursor-pointer transition-colors"
-              >
-                <ShopIcon className="w-5 h-5 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-xs font-bold text-white whitespace-nowrap">Relic Shop</div>
-                  <div className="text-[10px] text-emerald-300 whitespace-nowrap">
-                    {THEME_SKINS[equippedSkin].name}
-                  </div>
-                </div>
-              </button>
+            {/* Subtle Contextual Status Strip */}
+            <div className="w-full text-center text-[11px] text-emerald-200/85 truncate border-t border-[#163328] pt-1">
+              {statusBannerText}
             </div>
-          </div>
-
-          {/* Bottom Perimeter Status Line */}
-          <div className="flex items-center justify-between text-xs text-emerald-200/85 px-2">
-            <div className="font-medium truncate max-w-xl">{statusBannerText}</div>
-            <div className="hidden md:block font-mono-tabular text-emerald-300/70">
-              1-3 Select · Arrows/Mouse Move · Space Place · R Rotate · H Hammer · F Reroll
-            </div>
-          </div>
+          </footer>
         </div>
       )}
 
@@ -1235,7 +1223,6 @@ export default function App() {
               </h2>
             </div>
 
-            {/* 3 Tabular-Nums Mastery / Progress Stat Tiles */}
             <div className="grid grid-cols-3 gap-2.5 p-3.5 rounded-xl bg-[#07130F] border border-[#1D4033] font-mono-tabular">
               <div>
                 <div className="text-[10px] text-emerald-300/70 uppercase">SCORE / BEST</div>
@@ -1257,7 +1244,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Rewarded Ad 2x Payout Multiplier on Victory */}
             {frozenSummary.outcome === 'victory' && !frozenSummary.doubledPayoutClaimed && (
               <button
                 type="button"
@@ -1280,7 +1266,6 @@ export default function App() {
               </button>
             )}
 
-            {/* F2P One-Time "Last Chance Continue" on Defeat */}
             {frozenSummary.outcome === 'defeat' && !lastChanceUsed && (
               <button
                 type="button"
@@ -1321,7 +1306,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 6. META-PROGRESSION MODALS (Daily Calendar, 500 Campaign, League Cohort, Shop) */}
+      {/* 6. META-PROGRESSION MODALS */}
       <MetaModals
         activeModal={activeModal}
         onClose={() => setActiveModal(null)}

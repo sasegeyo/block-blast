@@ -9,6 +9,7 @@ import {
   TrayPiece,
   canPlacePiece,
   findBestValidPlacement,
+  getProjectedClearLines,
 } from '../game/rules';
 import { THEME_SKINS } from '../game/metaState';
 import { soundSynth } from '../game/audioSynth';
@@ -18,8 +19,13 @@ export type ShellState = 'title' | 'playing' | 'paused' | 'gameover';
 export interface CanvasParticleBurst {
   id: number;
   cells: Array<{ row: number; col: number; color: BlockColor }>;
-  intensity: 'light' | 'heavy';
+  placedCells?: Array<{ row: number; col: number }>;
+  fullRows?: number[];
+  fullCols?: number[];
+  ringCenter?: { row: number; col: number };
+  intensity: 'light' | 'medium' | 'heavy';
   calloutText?: string;
+  secondaryBannerText?: string;
 }
 
 interface RelicBoardCanvasProps {
@@ -53,6 +59,7 @@ interface PooledParticle {
   life: number;
   maxLife: number;
   color: string;
+  isSpark: boolean;
 }
 
 interface PooledFloatingText {
@@ -64,10 +71,31 @@ interface PooledFloatingText {
   color: string;
   life: number;
   maxLife: number;
+  scale: number;
 }
 
-const MAX_PARTICLES = 180;
+interface PooledShockwave {
+  active: boolean;
+  kind: 'row' | 'col' | 'ring';
+  indexOrRow: number;
+  col: number;
+  life: number;
+  maxLife: number;
+  color: string;
+}
+
+interface PlacedCellBounce {
+  active: boolean;
+  row: number;
+  col: number;
+  life: number;
+  maxLife: number;
+}
+
+const MAX_PARTICLES = 220;
 const MAX_FLOATING_TEXTS = 16;
+const MAX_SHOCKWAVES = 16;
+const MAX_CELL_BOUNCES = 24;
 
 export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -131,6 +159,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       life: 0,
       maxLife: 1,
       color: '#FBBF24',
+      isSpark: false,
     }));
     let particleHead = 0;
 
@@ -141,7 +170,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       vy: number,
       size: number,
       maxLife: number,
-      color: string
+      color: string,
+      isSpark = false
     ) => {
       const p = particles[particleHead];
       particleHead = (particleHead + 1) % MAX_PARTICLES;
@@ -155,32 +185,90 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       p.life = 0;
       p.maxLife = maxLife;
       p.color = color;
+      p.isSpark = isSpark;
     };
 
-    // Zero-GC Pooled Floating Text Ring Buffer
+    // Zero-GC Pooled Floating Combo Banners
     const floatingTexts: PooledFloatingText[] = Array.from({ length: MAX_FLOATING_TEXTS }, () => ({
       active: false,
       x: 0,
       y: 0,
-      vy: -45,
+      vy: -54,
       text: '',
       color: '#FDE68A',
       life: 0,
-      maxLife: 1.1,
+      maxLife: 1.2,
+      scale: 1,
     }));
     let textHead = 0;
 
-    const spawnFloatingText = (x: number, y: number, text: string, color: string) => {
+    const spawnFloatingText = (
+      x: number,
+      y: number,
+      text: string,
+      color: string,
+      scale = 1.15
+    ) => {
       const ft = floatingTexts[textHead];
       textHead = (textHead + 1) % MAX_FLOATING_TEXTS;
       ft.active = true;
       ft.x = x;
       ft.y = y;
-      ft.vy = -52;
+      ft.vy = -56;
       ft.text = text;
       ft.color = color;
       ft.life = 0;
-      ft.maxLife = 1.15;
+      ft.maxLife = 1.25;
+      ft.scale = scale;
+    };
+
+    // Zero-GC Pooled Shockwaves (Row Beams, Col Beams & Blast Rings)
+    const shockwaves: PooledShockwave[] = Array.from({ length: MAX_SHOCKWAVES }, () => ({
+      active: false,
+      kind: 'row',
+      indexOrRow: 0,
+      col: 0,
+      life: 0,
+      maxLife: 0.45,
+      color: '#FDE68A',
+    }));
+    let shockwaveHead = 0;
+
+    const spawnShockwave = (
+      kind: 'row' | 'col' | 'ring',
+      indexOrRow: number,
+      col: number,
+      color: string
+    ) => {
+      const sw = shockwaves[shockwaveHead];
+      shockwaveHead = (shockwaveHead + 1) % MAX_SHOCKWAVES;
+      sw.active = true;
+      sw.kind = kind;
+      sw.indexOrRow = indexOrRow;
+      sw.col = col;
+      sw.life = 0;
+      sw.maxLife = kind === 'ring' ? 0.52 : 0.44;
+      sw.color = color;
+    };
+
+    // Zero-GC Per-Cell Placement Squash & Bounce Pool
+    const cellBounces: PlacedCellBounce[] = Array.from({ length: MAX_CELL_BOUNCES }, () => ({
+      active: false,
+      row: 0,
+      col: 0,
+      life: 0,
+      maxLife: 0.24,
+    }));
+    let bounceHead = 0;
+
+    const spawnCellBounce = (row: number, col: number) => {
+      const cb = cellBounces[bounceHead];
+      bounceHead = (bounceHead + 1) % MAX_CELL_BOUNCES;
+      cb.active = true;
+      cb.row = row;
+      cb.col = col;
+      cb.life = 0;
+      cb.maxLife = 0.24;
     };
 
     // Ambient Fireflies / Embers (Fixed array, zero GC)
@@ -197,8 +285,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
     let simTime = 0;
     let hitstopTimer = 0;
     let cameraTrauma = 0;
-    let boardSquash = 0; // subtle spring impulse on placement
-    let pointerX = width * 0.65;
+    let boardSquash = 0;
+    let pointerX = width * 0.5;
     let pointerY = height * 0.5;
     let isDragging = false;
     let cursorRow = 3;
@@ -206,7 +294,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
     let hoverRow = -1;
     let hoverCol = -1;
 
-    // Unified Input Hub (held vs edge-triggered justPressed)
+    // Unified Input Hub
     const heldKeys = new Set<string>();
     const justPressedKeys = new Set<string>();
 
@@ -216,34 +304,60 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       isDragging = false;
     };
 
-    // Layout computation helper
+    /**
+     * Mobile-First Vertically Stacked Viewport Geometry:
+     * Top HUD (~114px) -> 8x8 Carved Relic Grid -> 3-Piece Tray -> Dedicated Bottom Booster Bar (~94px)
+     */
     const computeLayout = () => {
       const isTitle = propsRef.current.shellState === 'title';
       const minDim = Math.min(width, height);
-      const cellSize = isTitle
-        ? Math.max(28, Math.min(48, Math.floor(minDim * 0.052)))
-        : Math.max(30, Math.min(50, Math.floor((height - 230) / (BOARD_SIZE + 2.6))));
+
+      if (isTitle) {
+        const cellSize = Math.max(28, Math.min(48, Math.floor(minDim * 0.052)));
+        const boardPx = cellSize * BOARD_SIZE;
+        const boardCenterX = width >= 900 ? width * 0.68 : width * 0.5;
+        const boardCenterY = width >= 900 ? height * 0.5 : height * 0.66;
+        const boardLeft = Math.round(boardCenterX - boardPx / 2);
+        const boardTop = Math.round(boardCenterY - boardPx / 2);
+        return {
+          cellSize,
+          boardPx,
+          boardLeft,
+          boardTop,
+          boardCenterX,
+          boardCenterY,
+          trayTop: boardTop + boardPx + 18,
+          traySlotWidth: Math.floor(boardPx / 3),
+          trayHeight: 84,
+        };
+      }
+
+      // Playing / Paused / Gameover Mobile-First Centered Stack
+      const topSafe = height < 740 ? 96 : 114;
+      const bottomBoosterSafe = height < 740 ? 84 : 98;
+      const availableVertical = Math.max(300, height - topSafe - bottomBoosterSafe);
+      const maxContainerWidth = Math.min(width - 24, 448);
+
+      // Fit 8 board rows + 0.45 gap + 2.15 tray height inside availableVertical
+      const cellByHeight = Math.floor(availableVertical / (BOARD_SIZE + 2.65));
+      const cellByWidth = Math.floor((maxContainerWidth - 20) / BOARD_SIZE);
+      const cellSize = Math.max(28, Math.min(50, Math.min(cellByHeight, cellByWidth)));
       const boardPx = cellSize * BOARD_SIZE;
 
-      // On Title Screen, stage the showcase board in the right 62% of viewport so left 38% is negative space
-      const boardCenterX = isTitle
-        ? width >= 900
-          ? width * 0.68
-          : width * 0.5
-        : width * 0.5;
-      const boardCenterY = isTitle
-        ? width >= 900
-          ? height * 0.5
-          : height * 0.64
-        : Math.max(84 + boardPx / 2, height * 0.41);
+      const trayGap = Math.max(12, Math.floor(cellSize * 0.36));
+      const trayHeight = Math.max(76, Math.floor(cellSize * 2.08));
+      const totalStackHeight = boardPx + trayGap + trayHeight;
 
+      const boardCenterX = width * 0.5;
+      const stackTop = Math.round(
+        topSafe + Math.max(4, (availableVertical - totalStackHeight) * 0.42)
+      );
+      const boardTop = stackTop;
       const boardLeft = Math.round(boardCenterX - boardPx / 2);
-      const boardTop = Math.round(boardCenterY - boardPx / 2);
+      const boardCenterY = boardTop + boardPx / 2;
 
-      // Tray dock below the board
-      const trayTop = boardTop + boardPx + Math.max(16, Math.floor(cellSize * 0.42));
-      const traySlotWidth = Math.max(96, Math.floor(boardPx / 3));
-      const trayHeight = Math.max(80, Math.floor(cellSize * 2.05));
+      const trayTop = boardTop + boardPx + trayGap;
+      const traySlotWidth = Math.floor(boardPx / 3);
 
       return {
         cellSize,
@@ -266,12 +380,14 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       };
     };
 
-    const updateHoverGridFromPointer = (cx: number, cy: number) => {
+    const updateHoverGridFromPointer = (cx: number, cy: number, applyDragLift = false) => {
       const layout = computeLayout();
       const p = propsRef.current;
       const selectedPiece = p.tray[p.selectedPieceIndex];
 
-      // Offset by piece center when dragging or hovering with a selected piece
+      // When dragging with finger/mouse, lift piece slightly above pointer for clear visibility
+      const effectiveY = applyDragLift ? cy - layout.cellSize * 0.65 : cy;
+
       let offsetRows = 0;
       let offsetCols = 0;
       if (!p.activeTargetingBooster && selectedPiece && !selectedPiece.used) {
@@ -280,17 +396,24 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       }
 
       const rawCol = Math.floor((cx - layout.boardLeft) / layout.cellSize);
-      const rawRow = Math.floor((cy - layout.boardTop) / layout.cellSize);
+      const rawRow = Math.floor((effectiveY - layout.boardTop) / layout.cellSize);
 
-      if (rawRow >= 0 && rawRow < BOARD_SIZE && rawCol >= 0 && rawCol < BOARD_SIZE) {
-        hoverRow = Math.max(0, Math.min(BOARD_SIZE - 1, rawRow - offsetRows));
-        hoverCol = Math.max(0, Math.min(BOARD_SIZE - 1, rawCol - offsetCols));
-        cursorRow = hoverRow;
-        cursorCol = hoverCol;
-      } else {
-        hoverRow = -1;
-        hoverCol = -1;
+      // Snap-to-grid magnetism: allow slight margin around the board when dragging
+      if (rawRow >= -1 && rawRow <= BOARD_SIZE && rawCol >= -1 && rawCol <= BOARD_SIZE) {
+        const pieceRows = selectedPiece ? selectedPiece.matrix.length : 1;
+        const pieceCols = selectedPiece ? selectedPiece.matrix[0].length : 1;
+        const clampedRow = Math.max(0, Math.min(BOARD_SIZE - pieceRows, rawRow - offsetRows));
+        const clampedCol = Math.max(0, Math.min(BOARD_SIZE - pieceCols, rawCol - offsetCols));
+        if (rawRow >= 0 && rawRow < BOARD_SIZE && rawCol >= 0 && rawCol < BOARD_SIZE) {
+          hoverRow = clampedRow;
+          hoverCol = clampedCol;
+          cursorRow = hoverRow;
+          cursorCol = hoverCol;
+          return;
+        }
       }
+      hoverRow = -1;
+      hoverCol = -1;
     };
 
     const handlePointerDown = (e: PointerEvent) => {
@@ -303,12 +426,12 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
 
       const layout = computeLayout();
 
-      // Check if clicking one of the 3 Tray Pieces
+      // Check if touching/clicking one of the 3 Tray Pieces
       if (
-        pt.y >= layout.trayTop - 8 &&
-        pt.y <= layout.trayTop + layout.trayHeight + 12 &&
-        pt.x >= layout.boardLeft - 16 &&
-        pt.x <= layout.boardLeft + layout.boardPx + 16
+        pt.y >= layout.trayTop - 10 &&
+        pt.y <= layout.trayTop + layout.trayHeight + 14 &&
+        pt.x >= layout.boardLeft - 18 &&
+        pt.x <= layout.boardLeft + layout.boardPx + 18
       ) {
         const slotIdx = Math.min(
           2,
@@ -318,15 +441,17 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           soundSynth.playSelect();
           p.onSelectPiece(slotIdx);
           isDragging = true;
+          requestRedrawRef.current();
           return;
         }
       }
 
-      // Check if clicking inside the Board
-      updateHoverGridFromPointer(pt.x, pt.y);
+      // Check if clicking directly onto the Board
+      updateHoverGridFromPointer(pt.x, pt.y, false);
       if (hoverRow >= 0 && hoverCol >= 0) {
         if (p.activeTargetingBooster) {
           p.onUseTargetBooster(hoverRow, hoverCol);
+          requestRedrawRef.current();
           return;
         }
         const piece = p.tray[p.selectedPieceIndex];
@@ -334,6 +459,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           boardSquash = 1;
           p.onPlacePiece(p.selectedPieceIndex, hoverRow, hoverCol);
           isDragging = false;
+          requestRedrawRef.current();
           return;
         }
       }
@@ -344,18 +470,19 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       pointerX = pt.x;
       pointerY = pt.y;
       if (propsRef.current.shellState === 'playing') {
-        updateHoverGridFromPointer(pt.x, pt.y);
+        updateHoverGridFromPointer(pt.x, pt.y, isDragging);
         requestRedrawRef.current();
       }
     };
 
     const handlePointerUp = (e: PointerEvent) => {
       if (!isDragging) return;
+      const wasDragging = isDragging;
       isDragging = false;
       const p = propsRef.current;
       if (p.shellState !== 'playing') return;
       const pt = screenToCanvas(e.clientX, e.clientY);
-      updateHoverGridFromPointer(pt.x, pt.y);
+      updateHoverGridFromPointer(pt.x, pt.y, wasDragging);
       if (hoverRow >= 0 && hoverCol >= 0) {
         const piece = p.tray[p.selectedPieceIndex];
         if (piece && !piece.used && canPlacePiece(p.board, piece, hoverRow, hoverCol)) {
@@ -363,6 +490,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           p.onPlacePiece(p.selectedPieceIndex, hoverRow, hoverCol);
         }
       }
+      requestRedrawRef.current();
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -377,7 +505,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
 
       const p = propsRef.current;
 
-      // Title screen Start handshake on Enter or Space
       if (p.shellState === 'title') {
         if (code === 'Enter' || code === 'Space') {
           e.preventDefault();
@@ -386,7 +513,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         return;
       }
 
-      // Pause toggle on Escape or KeyP
       if (code === 'Escape' || code === 'KeyP') {
         e.preventDefault();
         p.onTogglePause();
@@ -401,7 +527,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
 
       if (p.shellState !== 'playing') return;
 
-      // Piece Selection 1, 2, 3
       if (code === 'Digit1' || code === 'Numpad1') {
         soundSynth.playSelect();
         p.onSelectPiece(0);
@@ -463,7 +588,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
             boardSquash = 1;
             p.onPlacePiece(p.selectedPieceIndex, targetR, targetC);
           } else {
-            // Assist keyboard player by snapping to best valid placement if current cursor cell is blocked
             const best = findBestValidPlacement(p.board, piece);
             if (best) {
               cursorRow = best.row;
@@ -494,7 +618,10 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
     window.addEventListener('blur', clearInputs);
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // Helper to draw a tactile 3D beveled Relic Block cell
+    /**
+     * Renders a High-Fidelity 3D Beveled & Glossy Gem Relic Block
+     * with Dynamic Obstacle & Opportunity states (Frozen Cracks, Neon Fuse Bomb, Chromatic Wildcard).
+     */
     const drawRelicBlock = (
       x: number,
       y: number,
@@ -504,122 +631,277 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       frozenLayers: number,
       bombTimer: number,
       themeId: ThemeSkinId,
-      alpha: number = 1
+      alpha: number = 1,
+      scaleFactor: number = 1
     ) => {
       const theme = THEME_SKINS[themeId] || THEME_SKINS.mystic_forest;
       const palette = theme.blocks[colorKey] || theme.blocks.emerald;
-      const pad = 2;
-      const bx = x + pad;
-      const by = y + pad;
-      const bs = size - pad * 2;
-      if (bs <= 4) return;
+      const pad = Math.max(1.5, size * 0.045);
+      const rawBs = size - pad * 2;
+      if (rawBs <= 4) return;
+
+      const bs = rawBs * scaleFactor;
+      const bx = x + (size - bs) / 2;
+      const by = y + (size - bs) / 2;
+      const bevel = Math.max(3, Math.floor(bs * 0.14));
 
       ctx.save();
       ctx.globalAlpha = alpha;
 
-      // Outer dark silhouette
-      ctx.fillStyle = '#040B08';
+      // 1. Dark Outer Carved Silhouette + Drop Depth
+      ctx.fillStyle = '#030806';
       ctx.beginPath();
-      ctx.roundRect(bx - 1, by - 1, bs + 2, bs + 2, 6);
+      ctx.roundRect(bx - 1, by - 1, bs + 2, bs + 2.5, 6);
       ctx.fill();
 
-      // Main block body
-      ctx.fillStyle = palette.fill;
+      // 2. Main Block Base Fill (or Prismatic Rainbow Gradient for Wildcard)
+      if (kind === 'wildcard') {
+        const hue1 = Math.floor((simTime * 110) % 360);
+        const hue2 = (hue1 + 120) % 360;
+        const hue3 = (hue1 + 240) % 360;
+        const rainbowGrad = ctx.createLinearGradient(bx, by, bx + bs, by + bs);
+        rainbowGrad.addColorStop(0, `hsl(${hue1}, 88%, 60%)`);
+        rainbowGrad.addColorStop(0.5, `hsl(${hue2}, 90%, 55%)`);
+        rainbowGrad.addColorStop(1, `hsl(${hue3}, 88%, 58%)`);
+        ctx.fillStyle = rainbowGrad;
+      } else {
+        ctx.fillStyle = palette.fill;
+      }
       ctx.beginPath();
       ctx.roundRect(bx, by, bs, bs, 5);
       ctx.fill();
 
-      // Bottom bevel shadow
-      ctx.fillStyle = palette.bottomShadow;
+      // 3. 3D Top & Left Specular Bevel Faces
+      ctx.fillStyle = kind === 'wildcard' ? 'rgba(255, 255, 255, 0.48)' : palette.topHighlight;
       ctx.beginPath();
-      ctx.roundRect(bx, by + bs * 0.72, bs, bs * 0.28, [0, 0, 5, 5]);
+      ctx.moveTo(bx + 2, by);
+      ctx.lineTo(bx + bs - 2, by);
+      ctx.lineTo(bx + bs - bevel, by + bevel);
+      ctx.lineTo(bx + bevel, by + bevel);
+      ctx.closePath();
       ctx.fill();
 
-      // Top highlight bar
-      ctx.fillStyle = palette.topHighlight;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
       ctx.beginPath();
-      ctx.roundRect(bx + 2, by + 2, bs - 4, Math.max(3, bs * 0.18), 3);
+      ctx.moveTo(bx, by + 2);
+      ctx.lineTo(bx + bevel, by + bevel);
+      ctx.lineTo(bx + bevel, by + bs - bevel);
+      ctx.lineTo(bx, by + bs - 2);
+      ctx.closePath();
       ctx.fill();
 
-      // Inner carved runic frame
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(bx + 4, by + 4, bs - 8, bs - 8);
+      // 4. 3D Bottom & Right Deep Bevel Faces
+      ctx.fillStyle = kind === 'wildcard' ? 'rgba(15, 23, 42, 0.45)' : palette.bottomShadow;
+      ctx.beginPath();
+      ctx.moveTo(bx + bevel, by + bs - bevel);
+      ctx.lineTo(bx + bs - bevel, by + bs - bevel);
+      ctx.lineTo(bx + bs - 2, by + bs);
+      ctx.lineTo(bx + 2, by + bs);
+      ctx.closePath();
+      ctx.fill();
 
-      // Special Obstacle & Opportunity Overlays
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.28)';
+      ctx.beginPath();
+      ctx.moveTo(bx + bs - bevel, by + bevel);
+      ctx.lineTo(bx + bs, by + 2);
+      ctx.lineTo(bx + bs, by + bs - 2);
+      ctx.lineTo(bx + bs - bevel, by + bs - bevel);
+      ctx.closePath();
+      ctx.fill();
+
+      // 5. Raised Center Gem Facet + Glossy Diagonal Glassmorphic Sheen
+      const innerX = bx + bevel;
+      const innerY = by + bevel;
+      const innerS = bs - bevel * 2;
+      if (innerS > 4) {
+        const faceGrad = ctx.createLinearGradient(innerX, innerY, innerX, innerY + innerS);
+        if (kind === 'wildcard') {
+          faceGrad.addColorStop(0, 'rgba(255, 255, 255, 0.35)');
+          faceGrad.addColorStop(1, 'rgba(255, 255, 255, 0.05)');
+        } else {
+          faceGrad.addColorStop(0, palette.topHighlight);
+          faceGrad.addColorStop(0.35, palette.fill);
+          faceGrad.addColorStop(1, palette.bottomShadow);
+        }
+        ctx.fillStyle = faceGrad;
+        ctx.beginPath();
+        ctx.roundRect(innerX, innerY, innerS, innerS, 3);
+        ctx.fill();
+
+        // Diagonal glossy glass highlight
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.26)';
+        ctx.beginPath();
+        ctx.moveTo(innerX + 2, innerY + 1);
+        ctx.lineTo(innerX + innerS * 0.65, innerY + 1);
+        ctx.lineTo(innerX + innerS * 0.3, innerY + innerS * 0.55);
+        ctx.lineTo(innerX + 1, innerY + innerS * 0.55);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.32)';
+        ctx.lineWidth = 0.9;
+        ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerS - 1, innerS - 1);
+      }
+
+      // 6. Dynamic Obstacle & Opportunity Overlays
       if (kind === 'frozen') {
-        // Crystalline Frost Overlay + Layer Cracks (2 or 3 layers)
-        ctx.fillStyle = frozenLayers >= 3 ? 'rgba(186, 230, 253, 0.62)' : 'rgba(125, 211, 252, 0.44)';
+        // Multi-stage Icy Glaze & Realistic Frost Cracks
+        const frostGrad = ctx.createLinearGradient(bx, by, bx + bs, by + bs);
+        frostGrad.addColorStop(
+          0,
+          frozenLayers >= 3 ? 'rgba(224, 242, 254, 0.78)' : 'rgba(186, 230, 253, 0.58)'
+        );
+        frostGrad.addColorStop(1, 'rgba(56, 189, 248, 0.42)');
+        ctx.fillStyle = frostGrad;
         ctx.beginPath();
         ctx.roundRect(bx + 1, by + 1, bs - 2, bs - 2, 4);
         ctx.fill();
 
+        // Ice Rim Border
         ctx.strokeStyle = '#E0F2FE';
-        ctx.lineWidth = 1.8;
+        ctx.lineWidth = 1.6;
+        ctx.strokeRect(bx + 1.5, by + 1.5, bs - 3, bs - 3);
+
+        // Multi-stage Fracture Network (more cracks as frozenLayers decreases)
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 1.6;
         ctx.beginPath();
-        ctx.moveTo(bx + 5, by + 5);
-        ctx.lineTo(bx + bs * 0.52, by + bs * 0.48);
-        ctx.lineTo(bx + bs - 5, by + 8);
+        // Stage 1 crack (always visible)
+        ctx.moveTo(bx + 4, by + 5);
+        ctx.lineTo(bx + bs * 0.46, by + bs * 0.44);
+        ctx.lineTo(bx + bs - 5, by + 7);
+        if (frozenLayers <= 2) {
+          // Stage 2 branching fracture
+          ctx.moveTo(bx + bs * 0.46, by + bs * 0.44);
+          ctx.lineTo(bx + bs * 0.32, by + bs - 5);
+          ctx.moveTo(bx + 5, by + bs * 0.62);
+          ctx.lineTo(bx + bs * 0.46, by + bs * 0.44);
+        }
         if (frozenLayers === 1) {
-          // More fractured cracks when down to 1 layer
-          ctx.moveTo(bx + 6, by + bs - 6);
-          ctx.lineTo(bx + bs * 0.52, by + bs * 0.48);
-          ctx.lineTo(bx + bs - 6, by + bs - 5);
+          // Stage 3 critical shatterspiderweb
+          ctx.moveTo(bx + bs * 0.46, by + bs * 0.44);
+          ctx.lineTo(bx + bs - 4, by + bs - 6);
+          ctx.moveTo(bx + bs * 0.72, by + bs * 0.28);
+          ctx.lineTo(bx + bs * 0.85, by + bs * 0.65);
         }
         ctx.stroke();
 
-        // Layer badge in corner
-        ctx.fillStyle = '#082F49';
+        // Icy Sparkle Gleam on top-left corner
+        const gleamX = bx + bs * 0.24;
+        const gleamY = by + bs * 0.24;
+        ctx.fillStyle = '#FFFFFF';
         ctx.beginPath();
-        ctx.arc(bx + bs - 9, by + bs - 9, 7.5, 0, Math.PI * 2);
+        ctx.moveTo(gleamX, gleamY - 4);
+        ctx.lineTo(gleamX + 1.4, gleamY - 1.4);
+        ctx.lineTo(gleamX + 4, gleamY);
+        ctx.lineTo(gleamX + 1.4, gleamY + 1.4);
+        ctx.lineTo(gleamX, gleamY + 4);
+        ctx.lineTo(gleamX - 1.4, gleamY + 1.4);
+        ctx.lineTo(gleamX - 4, gleamY);
+        ctx.lineTo(gleamX - 1.4, gleamY - 1.4);
+        ctx.closePath();
         ctx.fill();
-        ctx.strokeStyle = '#7DD3FC';
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
 
-        ctx.fillStyle = '#F0F9FF';
-        ctx.font = '700 10px "JetBrains Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(`${frozenLayers}`, bx + bs - 9, by + bs - 8.5);
+        // Layer Counter Pill Badge
+        if (bs >= 24) {
+          ctx.fillStyle = '#082F49';
+          ctx.beginPath();
+          ctx.arc(bx + bs - 8.5, by + bs - 8.5, 7, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#7DD3FC';
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+
+          ctx.fillStyle = '#F0F9FF';
+          ctx.font = '700 9.5px "JetBrains Mono", monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(`${frozenLayers}`, bx + bs - 8.5, by + bs - 8);
+        }
       } else if (kind === 'bomb') {
-        // Pulsing Crimson Bomb Telegraph when bombTimer <= 2
+        // Bomb Block with Active Pulsating Neon Fuse & Danger Escalation (timer <= 2)
         const urgent = bombTimer <= 2;
-        const pulse = urgent ? 0.5 + 0.5 * Math.sin(simTime * 12) : 0;
+        const pulse = 0.5 + 0.5 * Math.sin(simTime * (urgent ? 16 : 6));
+
         if (urgent) {
-          ctx.fillStyle = `rgba(254, 202, 202, ${0.25 + pulse * 0.35})`;
+          ctx.fillStyle = `rgba(239, 68, 68, ${(0.28 + pulse * 0.42).toFixed(2)})`;
           ctx.beginPath();
           ctx.roundRect(bx, by, bs, bs, 5);
           ctx.fill();
+
+          ctx.strokeStyle = `rgba(254, 240, 138, ${(0.5 + pulse * 0.5).toFixed(2)})`;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(bx + 1, by + 1, bs - 2, bs - 2);
         }
 
-        // Bomb core sphere
-        ctx.fillStyle = '#111827';
+        const cx = bx + bs * 0.48;
+        const cy = by + bs * 0.55;
+        const radius = bs * 0.31;
+
+        // Fuse Cord + Pulsating Neon Spark Tip
+        const fuseEndX = cx + radius * 0.85;
+        const fuseEndY = cy - radius * 0.95;
+        ctx.strokeStyle = '#FBBF24';
+        ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(bx + bs / 2, by + bs / 2 + 1, bs * 0.31, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = urgent ? '#FCA5A5' : '#FBBF24';
-        ctx.lineWidth = 1.6;
+        ctx.moveTo(cx + radius * 0.35, cy - radius * 0.65);
+        ctx.quadraticCurveTo(cx + radius * 0.9, cy - radius * 0.7, fuseEndX, fuseEndY);
         ctx.stroke();
 
-        // Countdown numeral
+        // Neon Fuse Spark Glow
+        const sparkR = (urgent ? 3.8 : 2.6) + pulse * 1.8;
+        ctx.fillStyle = urgent ? '#EF4444' : '#F59E0B';
+        ctx.beginPath();
+        ctx.arc(fuseEndX, fuseEndY, sparkR + 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#FEF08A';
+        ctx.beginPath();
+        ctx.arc(fuseEndX, fuseEndY, sparkR * 0.65, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Metallic Bomb Sphere
+        const bombGrad = ctx.createRadialGradient(
+          cx - radius * 0.3,
+          cy - radius * 0.3,
+          1,
+          cx,
+          cy,
+          radius
+        );
+        bombGrad.addColorStop(0, '#475569');
+        bombGrad.addColorStop(0.5, '#0F172A');
+        bombGrad.addColorStop(1, '#020617');
+        ctx.fillStyle = bombGrad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = urgent ? '#FCA5A5' : '#FBBF24';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Animated Countdown Numeral
         ctx.fillStyle = urgent ? '#FEF08A' : '#FFFFFF';
-        ctx.font = `700 ${Math.max(11, Math.floor(bs * 0.36))}px "JetBrains Mono", monospace`;
+        ctx.font = `800 ${Math.max(10, Math.floor(bs * 0.34))}px "JetBrains Mono", monospace`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`${bombTimer}`, bx + bs / 2, by + bs / 2 + 1.5);
+        ctx.fillText(`${bombTimer}`, cx, cy + 1);
       } else if (kind === 'wildcard') {
-        // Golden Prismatic Star Opportunity Emblem
+        // Chromatic Sheen Border + Rotating Prismatic Star
         const cx = bx + bs / 2;
         const cy = by + bs / 2;
-        const outerR = bs * 0.32;
+        const outerR = bs * 0.33;
         const innerR = bs * 0.15;
-        ctx.fillStyle = '#FEF08A';
+
+        ctx.strokeStyle = '#FEF08A';
+        ctx.lineWidth = 1.6;
+        ctx.strokeRect(bx + 1.5, by + 1.5, bs - 3, bs - 3);
+
+        ctx.fillStyle = '#FFFBEB';
         ctx.strokeStyle = '#78350F';
-        ctx.lineWidth = 1.4;
+        ctx.lineWidth = 1.2;
         ctx.beginPath();
         for (let i = 0; i < 10; i++) {
-          const angle = (i * Math.PI) / 5 - Math.PI / 2 + simTime * 1.2;
+          const angle = (i * Math.PI) / 5 - Math.PI / 2 + simTime * 1.6;
           const r = i % 2 === 0 ? outerR : innerR;
           const px = cx + Math.cos(angle) * r;
           const py = cy + Math.sin(angle) * r;
@@ -634,84 +916,121 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       ctx.restore();
     };
 
-    // Main 60Hz Simulation & Render Loop (afterDraw pattern for lossless compositor sync)
+    // Main 60Hz Simulation & Render Loop
     let lastTime = performance.now();
     let rafId = 0;
-    let frameTimerId = 0;
-    let isDisposed = false;
+    const isDisposedRef = { current: false };
 
     const tick = (now: number) => {
-      if (isDisposed) return;
+      if (isDisposedRef.current) return;
 
       const rawDt = (now - lastTime) / 1000;
       lastTime = now;
-      // Clamp dt to <= 0.05s per game craft rules
       const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
 
       const p = propsRef.current;
       const theme = THEME_SKINS[p.themeId] || THEME_SKINS.mystic_forest;
       const layout = computeLayout();
 
-      // Check if a new particle burst signal arrived from React
+      // Process Incoming Burst, Shockwaves, Cell Bounces & Floating Combo Banners
       if (p.burstSignal && p.burstSignal.id !== lastBurstIdRef.current) {
         lastBurstIdRef.current = p.burstSignal.id;
-        const isHeavy = p.burstSignal.intensity === 'heavy';
-        hitstopTimer = isHeavy ? 0.065 : 0.035;
-        cameraTrauma = Math.min(1, cameraTrauma + (isHeavy ? 0.55 : 0.22));
+        const sig = p.burstSignal;
+        const isHeavy = sig.intensity === 'heavy';
+        const isMedium = sig.intensity === 'medium';
 
-        for (const cell of p.burstSignal.cells) {
+        hitstopTimer = isHeavy ? 0.06 : isMedium ? 0.035 : 0;
+        cameraTrauma = Math.min(
+          1,
+          cameraTrauma + (isHeavy ? 0.62 : isMedium ? 0.34 : 0.1)
+        );
+
+        // Register placement bounce animations
+        if (sig.placedCells) {
+          for (const pc of sig.placedCells) {
+            spawnCellBounce(pc.row, pc.col);
+          }
+        }
+
+        // Register Row & Column Shockwave Beams
+        if (sig.fullRows) {
+          for (const r of sig.fullRows) {
+            spawnShockwave('row', r, 0, '#FDE68A');
+          }
+        }
+        if (sig.fullCols) {
+          for (const c of sig.fullCols) {
+            spawnShockwave('col', c, 0, '#6EE7B7');
+          }
+        }
+        if (sig.ringCenter) {
+          spawnShockwave('ring', sig.ringCenter.row, sig.ringCenter.col, '#FBBF24');
+        }
+
+        // Explosive Debris & Spark Particles
+        for (const cell of sig.cells) {
           const cx = layout.boardLeft + (cell.col + 0.5) * layout.cellSize;
           const cy = layout.boardTop + (cell.row + 0.5) * layout.cellSize;
           const pal = theme.blocks[cell.color] || theme.blocks.amber;
-          const count = isHeavy ? 6 : 3;
+          const count = isHeavy ? 8 : isMedium ? 5 : 3;
           for (let i = 0; i < count; i++) {
             const angle = Math.random() * Math.PI * 2;
-            const speed = (isHeavy ? 110 : 65) + Math.random() * 140;
+            const speed = (isHeavy ? 135 : 75) + Math.random() * 165;
             spawnParticle(
               cx,
               cy,
               Math.cos(angle) * speed,
-              Math.sin(angle) * speed - 35,
-              3 + Math.random() * 4,
-              0.42 + Math.random() * 0.35,
-              i % 2 === 0 ? pal.topHighlight : '#FEF08A'
+              Math.sin(angle) * speed - 45,
+              3.5 + Math.random() * 4.5,
+              0.45 + Math.random() * 0.38,
+              i % 3 === 0 ? '#FEF08A' : i % 2 === 0 ? pal.topHighlight : pal.fill,
+              i % 2 === 0
             );
           }
         }
 
-        if (p.burstSignal.calloutText) {
+        if (sig.calloutText) {
           spawnFloatingText(
             layout.boardCenterX,
-            layout.boardTop + layout.boardPx * 0.35,
-            p.burstSignal.calloutText,
-            '#FDE68A'
+            layout.boardTop + layout.boardPx * 0.42,
+            sig.calloutText,
+            '#FDE68A',
+            isHeavy ? 1.32 : 1.12
+          );
+        }
+        if (sig.secondaryBannerText) {
+          spawnFloatingText(
+            layout.boardCenterX,
+            layout.boardTop + layout.boardPx * 0.26,
+            sig.secondaryBannerText,
+            '#6EE7B7',
+            1.42
           );
         }
       }
 
-      // Sim-level hitstop vs render dt
       if (hitstopTimer > 0) {
         hitstopTimer = Math.max(0, hitstopTimer - dt);
       }
       const simDt = hitstopTimer > 0 || p.shellState === 'paused' ? 0 : dt;
       simTime += simDt;
 
-      // Decay camera trauma & board squash
-      cameraTrauma = Math.max(0, cameraTrauma - dt * 2.4);
-      boardSquash = Math.max(0, boardSquash - dt * 6.5);
+      // Decay camera trauma & board bounce
+      cameraTrauma = Math.max(0, cameraTrauma - dt * 2.5);
+      boardSquash = Math.max(0, boardSquash - dt * 7);
 
-      const shakeMag = cameraTrauma * cameraTrauma * 11;
+      const shakeMag = cameraTrauma * cameraTrauma * 13;
       const shakeX = shakeMag > 0.1 ? (Math.random() * 2 - 1) * shakeMag : 0;
       const shakeY = shakeMag > 0.1 ? (Math.random() * 2 - 1) * shakeMag : 0;
 
       ctx.save();
       ctx.scale(dpr, dpr);
 
-      // 1. Background Atmospheric Gradient
+      // 1. Atmospheric Sanctuary Radial Canvas Backdrop
       const bgGrad = ctx.createRadialGradient(
         layout.boardCenterX,
         layout.boardCenterY,
-        40,
+        30,
         layout.boardCenterX,
         layout.boardCenterY,
         Math.max(width, height) * 0.85
@@ -721,15 +1040,12 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       ctx.fillStyle = bgGrad;
       ctx.fillRect(0, 0, width, height);
 
-      // Subtle architectural runic rings in background
+      // Subtle Carved Halo Rings around the Board
       ctx.save();
       ctx.strokeStyle = 'rgba(217, 155, 38, 0.06)';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(layout.boardCenterX, layout.boardCenterY, layout.boardPx * 0.68, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(layout.boardCenterX, layout.boardCenterY, layout.boardPx * 0.82, 0, Math.PI * 2);
+      ctx.arc(layout.boardCenterX, layout.boardCenterY, layout.boardPx * 0.66, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
 
@@ -739,37 +1055,40 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         if (e.y < -0.05) e.y = 1.05;
         const ex = ((e.x + Math.sin(simTime * 0.8 + e.phase) * e.driftX + 1) % 1) * width;
         const ey = e.y * height;
-        const alpha = 0.2 + 0.25 * Math.sin(simTime * 2.2 + e.phase);
+        const alpha = 0.18 + 0.24 * Math.sin(simTime * 2.2 + e.phase);
         ctx.fillStyle = `rgba(251, 191, 36, ${alpha.toFixed(3)})`;
         ctx.beginPath();
         ctx.arc(ex, ey, e.radius, 0, Math.PI * 2);
         ctx.fill();
       }
 
-      // Apply camera shake + subtle parallax tilt on Title Screen
+      // Apply Camera Shake + Placement Squash-and-Stretch Impulse
       ctx.save();
       const parallaxX =
         p.shellState === 'title' ? ((pointerX - width * 0.5) / width) * 14 : 0;
       const parallaxY =
         p.shellState === 'title' ? ((pointerY - height * 0.5) / height) * 10 : 0;
 
-      const squashScaleX = 1 + boardSquash * 0.018;
-      const squashScaleY = 1 - boardSquash * 0.018;
+      const squashScaleX = 1 + boardSquash * 0.016;
+      const squashScaleY = 1 - boardSquash * 0.016;
 
-      ctx.translate(layout.boardCenterX + shakeX + parallaxX, layout.boardCenterY + shakeY + parallaxY);
+      ctx.translate(
+        layout.boardCenterX + shakeX + parallaxX,
+        layout.boardCenterY + shakeY + parallaxY
+      );
       ctx.scale(squashScaleX, squashScaleY);
       ctx.translate(-layout.boardCenterX, -layout.boardCenterY);
 
-      // 3. Board Sanctuary Frame
-      const framePad = 12;
-      ctx.fillStyle = '#040B08';
+      // 3. Carved Stone Relic Board Frame
+      const framePad = 10;
+      ctx.fillStyle = '#030806';
       ctx.beginPath();
       ctx.roundRect(
         layout.boardLeft - framePad - 3,
         layout.boardTop - framePad - 3,
         layout.boardPx + (framePad + 3) * 2,
         layout.boardPx + (framePad + 3) * 2,
-        16
+        18
       );
       ctx.fill();
 
@@ -782,7 +1101,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         layout.boardTop - framePad,
         layout.boardPx + framePad * 2,
         layout.boardPx + framePad * 2,
-        14
+        15
       );
       ctx.fill();
       ctx.stroke();
@@ -791,45 +1110,88 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       if (p.architecture === 'shifting') {
         for (let r = 2; r <= 5; r++) {
           const ry = layout.boardTop + (r + 0.5) * layout.cellSize;
-          ctx.fillStyle = 'rgba(251, 191, 36, 0.55)';
+          ctx.fillStyle = 'rgba(251, 191, 36, 0.65)';
           ctx.beginPath();
-          ctx.moveTo(layout.boardLeft - 8, ry - 4);
-          ctx.lineTo(layout.boardLeft - 2, ry);
-          ctx.lineTo(layout.boardLeft - 8, ry + 4);
+          ctx.moveTo(layout.boardLeft - 7, ry - 4);
+          ctx.lineTo(layout.boardLeft - 1.5, ry);
+          ctx.lineTo(layout.boardLeft - 7, ry + 4);
           ctx.closePath();
           ctx.fill();
         }
       }
 
-      // 4. Render 8x8 Grid Cells
+      // Compute active cell bounce scale map
+      const getCellBounceScale = (r: number, c: number): number => {
+        for (let i = 0; i < MAX_CELL_BOUNCES; i++) {
+          const cb = cellBounces[i];
+          if (cb.active && cb.row === r && cb.col === c) {
+            const t = cb.life / cb.maxLife;
+            return 1 + Math.sin(t * Math.PI) * 0.16;
+          }
+        }
+        return 1;
+      };
+
+      // Update active cell bounces
+      for (let i = 0; i < MAX_CELL_BOUNCES; i++) {
+        const cb = cellBounces[i];
+        if (!cb.active) continue;
+        cb.life += dt;
+        if (cb.life >= cb.maxLife) cb.active = false;
+      }
+
+      // 4. Render 8x8 Carved Grid Sockets & Placed 3D Relic Blocks
       for (let r = 0; r < BOARD_SIZE; r++) {
         for (let c = 0; c < BOARD_SIZE; c++) {
           const cell = p.board[r][c];
           const cx = layout.boardLeft + c * layout.cellSize;
           const cy = layout.boardTop + r * layout.cellSize;
+          const s = layout.cellSize;
 
           if (cell.kind === 'void') {
-            // Carved Sanctuary Void Pit
             ctx.fillStyle = theme.cellVoidFill;
             ctx.beginPath();
-            ctx.roundRect(cx + 2, cy + 2, layout.cellSize - 4, layout.cellSize - 4, 6);
+            ctx.roundRect(cx + 2, cy + 2, s - 4, s - 4, 6);
             ctx.fill();
-            ctx.strokeStyle = 'rgba(217, 155, 38, 0.18)';
+            ctx.strokeStyle = 'rgba(217, 155, 38, 0.16)';
             ctx.lineWidth = 1;
             ctx.stroke();
             continue;
           }
 
-          // Empty socket
+          // Recessed Carved Stone Socket Base
           ctx.fillStyle = theme.cellEmptyFill;
+          ctx.beginPath();
+          ctx.roundRect(cx + 1.5, cy + 1.5, s - 3, s - 3, 5.5);
+          ctx.fill();
+
+          // Recessed Inner Top-Left Shadow
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(cx + 2.5, cy + s - 3);
+          ctx.lineTo(cx + 2.5, cy + 2.5);
+          ctx.lineTo(cx + s - 3, cy + 2.5);
+          ctx.stroke();
+
+          // Subtle Bottom-Right Socket Rim Highlight
           ctx.strokeStyle = theme.cellEmptyStroke;
           ctx.lineWidth = 1;
           ctx.beginPath();
-          ctx.roundRect(cx + 1.5, cy + 1.5, layout.cellSize - 3, layout.cellSize - 3, 5);
-          ctx.fill();
+          ctx.moveTo(cx + s - 2, cy + 3);
+          ctx.lineTo(cx + s - 2, cy + s - 2);
+          ctx.lineTo(cx + 3, cy + s - 2);
           ctx.stroke();
 
-          // On Title Screen, animate a self-playing showcase pattern on empty cells
+          // Faint Etched Center Rune Dot inside empty socket
+          if (cell.kind === 'empty' && p.shellState !== 'title') {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+            ctx.beginPath();
+            ctx.arc(cx + s / 2, cy + s / 2, 2, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          // Title Screen Animated Showcase Blocks
           if (p.shellState === 'title' && cell.kind === 'empty') {
             const wave = Math.sin(simTime * 2.1 + r * 0.55 + c * 0.45);
             if (wave > 0.35) {
@@ -846,32 +1208,35 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
               drawRelicBlock(
                 cx,
                 cy,
-                layout.cellSize,
+                s,
                 colKey,
                 demoKind,
                 2,
-                4,
+                2,
                 p.themeId,
-                Math.min(1, (wave - 0.35) * 2.2)
+                Math.min(1, (wave - 0.35) * 2.2),
+                1
               );
             }
           } else if (cell.kind !== 'empty') {
+            const bScale = getCellBounceScale(r, c);
             drawRelicBlock(
               cx,
               cy,
-              layout.cellSize,
+              s,
               cell.color,
               cell.kind,
               cell.frozenLayers,
               cell.bombTimer,
               p.themeId,
-              1
+              1,
+              bScale
             );
           }
         }
       }
 
-      // 5. Render Ghost Placement Preview or Target Booster Reticle when Playing
+      // 5. Render Ghost Placement Preview + Clear-Line Projections
       if (p.shellState === 'playing') {
         const previewR = hoverRow >= 0 ? hoverRow : cursorRow;
         const previewC = hoverCol >= 0 ? hoverCol : cursorCol;
@@ -887,7 +1252,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
             for (let c = minC; c <= maxC; c++) {
               const cx = layout.boardLeft + c * layout.cellSize;
               const cy = layout.boardTop + r * layout.cellSize;
-              ctx.fillStyle = 'rgba(239, 68, 68, 0.32)';
+              ctx.fillStyle = 'rgba(239, 68, 68, 0.34)';
               ctx.strokeStyle = '#FEF08A';
               ctx.lineWidth = 2.2;
               ctx.beginPath();
@@ -900,6 +1265,42 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           const piece = p.tray[p.selectedPieceIndex];
           if (piece && !piece.used && previewR >= 0 && previewC >= 0) {
             const valid = canPlacePiece(p.board, piece, previewR, previewC);
+
+            // Highlight Projected Line Clears when placement is valid!
+            if (valid) {
+              const projected = getProjectedClearLines(p.board, piece, previewR, previewC);
+              const projPulse = 0.32 + 0.22 * Math.sin(simTime * 10);
+
+              for (const pr of projected.rows) {
+                const ry = layout.boardTop + pr * layout.cellSize;
+                ctx.fillStyle = `rgba(253, 230, 138, ${projPulse.toFixed(2)})`;
+                ctx.fillRect(layout.boardLeft, ry + 2, layout.boardPx, layout.cellSize - 4);
+                ctx.strokeStyle = '#FDE68A';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(
+                  layout.boardLeft + 1,
+                  ry + 2,
+                  layout.boardPx - 2,
+                  layout.cellSize - 4
+                );
+              }
+
+              for (const pc of projected.cols) {
+                const rx = layout.boardLeft + pc * layout.cellSize;
+                ctx.fillStyle = `rgba(110, 231, 183, ${projPulse.toFixed(2)})`;
+                ctx.fillRect(rx + 2, layout.boardTop, layout.cellSize - 4, layout.boardPx);
+                ctx.strokeStyle = '#6EE7B7';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(
+                  rx + 2,
+                  layout.boardTop + 1,
+                  layout.cellSize - 4,
+                  layout.boardPx - 2
+                );
+              }
+            }
+
+            // Render Ghost Piece Preview on Grid
             for (let dr = 0; dr < piece.matrix.length; dr++) {
               for (let dc = 0; dc < piece.matrix[0].length; dc++) {
                 if (piece.matrix[dr][dc] === 1) {
@@ -919,15 +1320,16 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
                         mod?.frozenLayers ?? 2,
                         mod?.bombTimer ?? 5,
                         p.themeId,
-                        0.58
+                        0.62,
+                        0.98
                       );
                       ctx.strokeStyle = '#FEF08A';
                       ctx.lineWidth = 2;
                       ctx.strokeRect(cx + 2, cy + 2, layout.cellSize - 4, layout.cellSize - 4);
                     } else {
                       ctx.fillStyle = 'rgba(239, 68, 68, 0.25)';
-                      ctx.strokeStyle = 'rgba(248, 113, 113, 0.75)';
-                      ctx.lineWidth = 1.5;
+                      ctx.strokeStyle = 'rgba(248, 113, 113, 0.78)';
+                      ctx.lineWidth = 1.6;
                       ctx.strokeRect(cx + 3, cy + 3, layout.cellSize - 6, layout.cellSize - 6);
                     }
                   }
@@ -938,21 +1340,89 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         }
       }
 
-      // 6. Render Bottom 3-Piece Tactician Tray Dock (when not on Title Screen)
+      // 6. Update & Render Line Clear / Blast Shockwave Beams & Rings
+      for (let i = 0; i < MAX_SHOCKWAVES; i++) {
+        const sw = shockwaves[i];
+        if (!sw.active) continue;
+        sw.life += dt;
+        if (sw.life >= sw.maxLife) {
+          sw.active = false;
+          continue;
+        }
+        const progress = sw.life / sw.maxLife;
+        const alpha = 1 - progress;
+
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, alpha);
+
+        if (sw.kind === 'row') {
+          const cy = layout.boardTop + (sw.indexOrRow + 0.5) * layout.cellSize;
+          const beamHalfH = layout.cellSize * (0.65 * (1 - progress * 0.5));
+          const spanW = layout.boardPx * (0.4 + 0.65 * Math.sin(progress * Math.PI * 0.5));
+          const grad = ctx.createLinearGradient(
+            layout.boardCenterX - spanW / 2,
+            cy,
+            layout.boardCenterX + spanW / 2,
+            cy
+          );
+          grad.addColorStop(0, 'rgba(253, 230, 138, 0)');
+          grad.addColorStop(0.5, '#FEF08A');
+          grad.addColorStop(1, 'rgba(253, 230, 138, 0)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(
+            layout.boardCenterX - spanW / 2,
+            cy - beamHalfH,
+            spanW,
+            beamHalfH * 2
+          );
+        } else if (sw.kind === 'col') {
+          const cx = layout.boardLeft + (sw.indexOrRow + 0.5) * layout.cellSize;
+          const beamHalfW = layout.cellSize * (0.65 * (1 - progress * 0.5));
+          const spanH = layout.boardPx * (0.4 + 0.65 * Math.sin(progress * Math.PI * 0.5));
+          const grad = ctx.createLinearGradient(
+            cx,
+            layout.boardCenterY - spanH / 2,
+            cx,
+            layout.boardCenterY + spanH / 2
+          );
+          grad.addColorStop(0, 'rgba(110, 231, 183, 0)');
+          grad.addColorStop(0.5, '#A7F3D0');
+          grad.addColorStop(1, 'rgba(110, 231, 183, 0)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(
+            cx - beamHalfW,
+            layout.boardCenterY - spanH / 2,
+            beamHalfW * 2,
+            spanH
+          );
+        } else if (sw.kind === 'ring') {
+          const cx = layout.boardLeft + (sw.col + 0.5) * layout.cellSize;
+          const cy = layout.boardTop + (sw.indexOrRow + 0.5) * layout.cellSize;
+          const radius = layout.cellSize * (0.5 + progress * 2.4);
+          ctx.strokeStyle = sw.color;
+          ctx.lineWidth = Math.max(1.5, (1 - progress) * 7);
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // 7. Render 3-Piece Tactician Tray Below Board (with 1.1x Lift & Drop-Shadow)
       if (p.shellState !== 'title') {
         const trayLeft = layout.boardLeft;
         const trayWidth = layout.boardPx;
 
-        // Tray Dock Backing
-        ctx.fillStyle = 'rgba(7, 19, 15, 0.92)';
-        ctx.strokeStyle = 'rgba(217, 155, 38, 0.42)';
-        ctx.lineWidth = 1.8;
+        // Recessed Tray Dock Surface
+        ctx.fillStyle = 'rgba(6, 16, 12, 0.94)';
+        ctx.strokeStyle = 'rgba(217, 155, 38, 0.45)';
+        ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.roundRect(trayLeft - 8, layout.trayTop, trayWidth + 16, layout.trayHeight, 12);
+        ctx.roundRect(trayLeft - 8, layout.trayTop, trayWidth + 16, layout.trayHeight, 14);
         ctx.fill();
         ctx.stroke();
 
-        const miniCell = Math.max(16, Math.min(24, Math.floor(layout.cellSize * 0.48)));
+        const baseMiniCell = Math.max(15, Math.min(23, Math.floor(layout.cellSize * 0.47)));
 
         for (let i = 0; i < 3; i++) {
           const piece = p.tray[i];
@@ -960,24 +1430,31 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           const slotCenterX = slotX + layout.traySlotWidth / 2;
           const slotCenterY = layout.trayTop + layout.trayHeight / 2;
           const isSelected = i === p.selectedPieceIndex && piece && !piece.used;
+          const isBeingDragged = isSelected && isDragging;
 
-          // Selection slot highlight
+          // Slot divider & highlight
           if (isSelected) {
-            ctx.fillStyle = 'rgba(245, 158, 11, 0.14)';
+            ctx.fillStyle = 'rgba(245, 158, 11, 0.16)';
             ctx.strokeStyle = '#FBBF24';
             ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.roundRect(slotX + 4, layout.trayTop + 6, layout.traySlotWidth - 8, layout.trayHeight - 12, 9);
+            ctx.roundRect(
+              slotX + 4,
+              layout.trayTop + 5,
+              layout.traySlotWidth - 8,
+              layout.trayHeight - 10,
+              10
+            );
             ctx.fill();
             ctx.stroke();
           }
 
-          // Key binding badge [1], [2], [3]
-          ctx.fillStyle = isSelected ? '#FBBF24' : 'rgba(167, 243, 208, 0.55)';
-          ctx.font = '700 11px "JetBrains Mono", monospace';
+          // Slot Key Indicator [1], [2], [3]
+          ctx.fillStyle = isSelected ? '#FBBF24' : 'rgba(167, 243, 208, 0.5)';
+          ctx.font = '700 10.5px "JetBrains Mono", monospace';
           ctx.textAlign = 'left';
           ctx.textBaseline = 'top';
-          ctx.fillText(`[${i + 1}]`, slotX + 12, layout.trayTop + 10);
+          ctx.fillText(`[${i + 1}]`, slotX + 10, layout.trayTop + 9);
 
           if (!piece || piece.used) {
             ctx.fillStyle = 'rgba(148, 163, 184, 0.25)';
@@ -988,14 +1465,31 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
             continue;
           }
 
+          // If this piece is actively being dragged, we draw it lifted under the pointer after the tray loop
+          if (isBeingDragged) {
+            continue;
+          }
+
+          // Selected piece lifts & scales 1.1x with dynamic drop shadow!
+          const scaleMult = isSelected ? 1.1 : 1.0;
+          const miniCell = Math.round(baseMiniCell * scaleMult);
+          const liftY = isSelected ? -4 : 3;
+
           const rows = piece.matrix.length;
           const cols = piece.matrix[0].length;
           const pWidth = cols * miniCell;
           const pHeight = rows * miniCell;
           const startX = Math.round(slotCenterX - pWidth / 2);
-          const startY = Math.round(slotCenterY - pHeight / 2 + 4);
+          const startY = Math.round(slotCenterY - pHeight / 2 + liftY);
 
           const fitsAnywhere = findBestValidPlacement(p.board, piece) !== null;
+
+          ctx.save();
+          if (isSelected) {
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.65)';
+            ctx.shadowBlur = 10;
+            ctx.shadowOffsetY = 6;
+          }
 
           for (let r = 0; r < rows; r++) {
             for (let c = 0; c < cols; c++) {
@@ -1010,17 +1504,57 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
                   mod?.frozenLayers ?? 2,
                   mod?.bombTimer ?? 5,
                   p.themeId,
-                  fitsAnywhere ? 1 : 0.38
+                  fitsAnywhere ? 1 : 0.38,
+                  1
                 );
               }
             }
           }
+          ctx.restore();
+        }
+
+        // Render Lifted Dragged Piece (1.15x scale + deep drop-shadow) following pointer
+        const draggedPiece = p.tray[p.selectedPieceIndex];
+        if (isDragging && draggedPiece && !draggedPiece.used) {
+          const dragCell = Math.round(layout.cellSize * 0.86);
+          const rows = draggedPiece.matrix.length;
+          const cols = draggedPiece.matrix[0].length;
+          const pWidth = cols * dragCell;
+          const pHeight = rows * dragCell;
+          const startX = Math.round(pointerX - pWidth / 2);
+          const startY = Math.round(pointerY - layout.cellSize * 0.65 - pHeight / 2);
+
+          ctx.save();
+          ctx.shadowColor = 'rgba(0, 0, 0, 0.78)';
+          ctx.shadowBlur = 18;
+          ctx.shadowOffsetY = 12;
+
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              if (draggedPiece.matrix[r][c] === 1) {
+                const mod = draggedPiece.modifiers.find((m) => m.dr === r && m.dc === c);
+                drawRelicBlock(
+                  startX + c * dragCell,
+                  startY + r * dragCell,
+                  dragCell,
+                  draggedPiece.color,
+                  mod ? mod.kind : 'normal',
+                  mod?.frozenLayers ?? 2,
+                  mod?.bombTimer ?? 5,
+                  p.themeId,
+                  0.94,
+                  1
+                );
+              }
+            }
+          }
+          ctx.restore();
         }
       }
 
       ctx.restore(); // Restore from shake/parallax transform
 
-      // 7. Update & Render Zero-GC Particle Pool
+      // 8. Update & Render Zero-GC Particle Pool (Debris & Sparks)
       for (let i = 0; i < MAX_PARTICLES; i++) {
         const pt = particles[i];
         if (!pt.active) continue;
@@ -1031,20 +1565,26 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         }
         pt.x += pt.vx * dt;
         pt.y += pt.vy * dt;
-        pt.vy += 260 * dt; // gravity
+        pt.vy += 310 * dt;
         const progress = pt.life / pt.maxLife;
         pt.alpha = 1 - progress;
 
         ctx.save();
         ctx.globalAlpha = Math.max(0, pt.alpha);
         ctx.fillStyle = pt.color;
-        ctx.beginPath();
-        ctx.roundRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size, 2);
-        ctx.fill();
+        if (pt.isSpark) {
+          ctx.translate(pt.x, pt.y);
+          ctx.rotate(pt.life * 8);
+          ctx.fillRect(-pt.size / 2, -pt.size / 2, pt.size, pt.size);
+        } else {
+          ctx.beginPath();
+          ctx.roundRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size, 2);
+          ctx.fill();
+        }
         ctx.restore();
       }
 
-      // 8. Update & Render Pooled Floating Score/Event Callouts
+      // 9. Update & Render Pooled Floating Combo Banners (Scale-Pop Entrance)
       for (let i = 0; i < MAX_FLOATING_TEXTS; i++) {
         const ft = floatingTexts[i];
         if (!ft.active) continue;
@@ -1054,17 +1594,25 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           continue;
         }
         ft.y += ft.vy * dt;
-        const alpha = 1 - ft.life / ft.maxLife;
+        const progress = ft.life / ft.maxLife;
+        const alpha = progress < 0.75 ? 1 : 1 - (progress - 0.75) / 0.25;
+        const popScale =
+          progress < 0.18
+            ? ft.scale * (0.7 + (progress / 0.18) * 0.52)
+            : ft.scale * (1.22 - Math.min(0.22, (progress - 0.18) * 0.5));
+
         ctx.save();
         ctx.globalAlpha = Math.max(0, alpha);
+        ctx.translate(ft.x, ft.y);
+        ctx.scale(popScale, popScale);
         ctx.font = '800 20px "Cinzel", Georgia, serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.strokeStyle = '#030A07';
-        ctx.lineWidth = 4;
-        ctx.strokeText(ft.text, ft.x, ft.y);
+        ctx.lineWidth = 4.5;
+        ctx.strokeText(ft.text, 0, 0);
         ctx.fillStyle = ft.color;
-        ctx.fillText(ft.text, ft.x, ft.y);
+        ctx.fillText(ft.text, 0, 0);
         ctx.restore();
       }
 
@@ -1072,13 +1620,13 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       ctx.restore();
 
       const isHeadless = typeof navigator !== 'undefined' && navigator.webdriver === true;
-      if (!isDisposed && !isHeadless) {
+      if (!isDisposedRef.current && !isHeadless) {
         rafId = requestAnimationFrame(tick);
       }
     };
 
     const scheduleSingleFrame = () => {
-      if (isDisposed) return;
+      if (isDisposedRef.current) return;
       cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(tick);
     };
@@ -1087,8 +1635,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
     scheduleSingleFrame();
 
     return () => {
-      isDisposed = true;
-      window.clearTimeout(frameTimerId);
+      isDisposedRef.current = true;
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
       canvas.removeEventListener('pointerdown', handlePointerDown);
