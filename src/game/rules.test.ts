@@ -203,3 +203,20 @@ test('getProjectedClearLines accurately predicts row and column clears on hover'
   assert.deepEqual(proj.rows, [2]);
   assert.deepEqual(proj.cols, []);
 });
+
+test('buildGodotProjectZipBytes builds a valid PKZIP archive with all Godot 4 project files', async () => {
+  const { GODOT_PROJECT_FILES, buildGodotProjectZipBytes } = await import('./godotExporter');
+  assert.ok(GODOT_PROJECT_FILES.length >= 6);
+  assert.ok(GODOT_PROJECT_FILES.some((f) => f.path === 'project.godot'));
+  assert.ok(GODOT_PROJECT_FILES.some((f) => f.path === 'scripts/RelicBoardCanvas.gd'));
+  assert.ok(GODOT_PROJECT_FILES.some((f) => f.path === 'scenes/Main.tscn'));
+
+  const zipBytes = buildGodotProjectZipBytes(GODOT_PROJECT_FILES);
+  assert.ok(zipBytes.byteLength > 2000);
+  const view = new DataView(zipBytes.buffer);
+  // Check PK\x03\x04 local file header signature
+  assert.equal(view.getUint32(0, true), 0x04034b50);
+  // Check PK\x05\x06 End of Central Directory signature at the end of the archive
+  assert.equal(view.getUint32(zipBytes.byteLength - 22, true), 0x06054b50);
+});
+

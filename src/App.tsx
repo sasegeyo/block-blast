@@ -48,6 +48,7 @@ import {
 } from './components/RelicIcons';
 import { CanvasParticleBurst, RelicBoardCanvas, ShellState } from './components/RelicBoardCanvas';
 import { ActiveMetaModal, MetaModals } from './components/MetaModals';
+import { GodotExportModal } from './components/GodotExportModal';
 
 interface FrozenRunSummary {
   outcome: 'victory' | 'defeat';
@@ -133,6 +134,12 @@ export default function App() {
   const [equippedSkin, setEquippedSkin] = useState<ThemeSkinId>('mystic_forest');
   const [claimedShopBundles, setClaimedShopBundles] = useState<string[]>([]);
   const [activeModal, setActiveModal] = useState<ActiveMetaModal>(null);
+  const [isGodotModalOpen, setIsGodotModalOpen] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return new URLSearchParams(window.location.search).get('godot') === '1';
+    }
+    return false;
+  });
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [frozenSummary, setFrozenSummary] = useState<FrozenRunSummary | null>(null);
 
@@ -857,6 +864,13 @@ export default function App() {
               >
                 League (#{playerLeagueRank})
               </button>
+              <button
+                type="button"
+                onClick={() => setIsGodotModalOpen(true)}
+                className="py-3.5 px-4 rounded-xl bg-[#14293A] hover:bg-[#1D3B52] border border-[#478CBF] text-[#9AD4FF] text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+              >
+                Godot 4 Çıktı (.ZIP)
+              </button>
             </div>
           </div>
 
@@ -943,6 +957,15 @@ export default function App() {
                 >
                   <ShopIcon className="hidden sm:block w-3 h-3 shrink-0" />
                   <span>Shop</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsGodotModalOpen(true)}
+                  aria-label="Godot 4 Export Studio"
+                  title="Godot 4.3+ Proje & Kaynak Kod Paketi İndir"
+                  className="flex items-center gap-0.5 px-1.5 py-1 rounded-md bg-[#122636] hover:bg-[#1A364D] border border-[#478CBF] text-[10px] sm:text-[11px] font-bold text-[#9AD4FF] cursor-pointer transition-colors whitespace-nowrap"
+                >
+                  <span>G4</span>
                 </button>
               </div>
 
@@ -1330,6 +1353,12 @@ export default function App() {
         claimedShopBundles={claimedShopBundles}
         onPurchaseBundle={handlePurchaseBundle}
         boosterStock={boosterStock}
+      />
+
+      {/* 7. GODOT 4.3+ PROJECT EXPORT STUDIO MODAL */}
+      <GodotExportModal
+        isOpen={isGodotModalOpen}
+        onClose={() => setIsGodotModalOpen(false)}
       />
     </main>
   );

@@ -388,30 +388,80 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       // When dragging with finger/mouse, lift piece slightly above pointer for clear visibility
       const effectiveY = applyDragLift ? cy - layout.cellSize * 0.65 : cy;
 
-      let offsetRows = 0;
-      let offsetCols = 0;
-      if (!p.activeTargetingBooster && selectedPiece && !selectedPiece.used) {
-        offsetRows = Math.floor((selectedPiece.matrix.length - 1) / 2);
-        offsetCols = Math.floor((selectedPiece.matrix[0].length - 1) / 2);
-      }
+      const floatCol = (cx - layout.boardLeft) / layout.cellSize;
+      const floatRow = (effectiveY - layout.boardTop) / layout.cellSize;
 
-      const rawCol = Math.floor((cx - layout.boardLeft) / layout.cellSize);
-      const rawRow = Math.floor((effectiveY - layout.boardTop) / layout.cellSize);
+      // Allow slight magnetic margin around the 8x8 board when dragging or hovering
+      if (
+        floatRow >= -0.85 &&
+        floatRow <= BOARD_SIZE + 0.85 &&
+        floatCol >= -0.85 &&
+        floatCol <= BOARD_SIZE + 0.85
+      ) {
+        if (p.activeTargetingBooster) {
+          const r = Math.max(0, Math.min(BOARD_SIZE - 1, Math.floor(floatRow)));
+          const c = Math.max(0, Math.min(BOARD_SIZE - 1, Math.floor(floatCol)));
+          hoverRow = r;
+          hoverCol = c;
+          cursorRow = r;
+          cursorCol = c;
+          return;
+        }
 
-      // Snap-to-grid magnetism: allow slight margin around the board when dragging
-      if (rawRow >= -1 && rawRow <= BOARD_SIZE && rawCol >= -1 && rawCol <= BOARD_SIZE) {
-        const pieceRows = selectedPiece ? selectedPiece.matrix.length : 1;
-        const pieceCols = selectedPiece ? selectedPiece.matrix[0].length : 1;
-        const clampedRow = Math.max(0, Math.min(BOARD_SIZE - pieceRows, rawRow - offsetRows));
-        const clampedCol = Math.max(0, Math.min(BOARD_SIZE - pieceCols, rawCol - offsetCols));
-        if (rawRow >= 0 && rawRow < BOARD_SIZE && rawCol >= 0 && rawCol < BOARD_SIZE) {
-          hoverRow = clampedRow;
-          hoverCol = clampedCol;
-          cursorRow = hoverRow;
-          cursorCol = hoverCol;
+        if (selectedPiece && !selectedPiece.used) {
+          const pieceRows = selectedPiece.matrix.length;
+          const pieceCols = selectedPiece.matrix[0].length;
+          const anchorFloatRow = floatRow - (pieceRows - 1) * 0.5;
+          const anchorFloatCol = floatCol - (pieceCols - 1) * 0.5;
+
+          const baseRow = Math.max(0, Math.min(BOARD_SIZE - pieceRows, Math.round(anchorFloatRow)));
+          const baseCol = Math.max(0, Math.min(BOARD_SIZE - pieceCols, Math.round(anchorFloatCol)));
+
+          if (canPlacePiece(p.board, selectedPiece, baseRow, baseCol)) {
+            hoverRow = baseRow;
+            hoverCol = baseCol;
+            cursorRow = baseRow;
+            cursorCol = baseCol;
+            return;
+          }
+
+          // Magnetic snap: search 1-cell neighborhood sorted by distance to pointer anchor
+          let bestNeighbor: { row: number; col: number; distSq: number } | null = null;
+          for (let dr = -1; dr <= 1; dr++) {
+            for (let dc = -1; dc <= 1; dc++) {
+              if (dr === 0 && dc === 0) continue;
+              const nr = baseRow + dr;
+              const nc = baseCol + dc;
+              if (nr < 0 || nr > BOARD_SIZE - pieceRows || nc < 0 || nc > BOARD_SIZE - pieceCols) {
+                continue;
+              }
+              if (canPlacePiece(p.board, selectedPiece, nr, nc)) {
+                const dRow = nr - anchorFloatRow;
+                const dCol = nc - anchorFloatCol;
+                const distSq = dRow * dRow + dCol * dCol;
+                if (!bestNeighbor || distSq < bestNeighbor.distSq) {
+                  bestNeighbor = { row: nr, col: nc, distSq };
+                }
+              }
+            }
+          }
+
+          if (bestNeighbor && bestNeighbor.distSq <= 1.85) {
+            hoverRow = bestNeighbor.row;
+            hoverCol = bestNeighbor.col;
+            cursorRow = bestNeighbor.row;
+            cursorCol = bestNeighbor.col;
+            return;
+          }
+
+          hoverRow = baseRow;
+          hoverCol = baseCol;
+          cursorRow = baseRow;
+          cursorCol = baseCol;
           return;
         }
       }
+
       hoverRow = -1;
       hoverCol = -1;
     };
@@ -458,6 +508,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         if (piece && !piece.used && canPlacePiece(p.board, piece, hoverRow, hoverCol)) {
           boardSquash = 1;
           p.onPlacePiece(p.selectedPieceIndex, hoverRow, hoverCol);
+          hoverRow = -1;
+          hoverCol = -1;
           isDragging = false;
           requestRedrawRef.current();
           return;
@@ -488,6 +540,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         if (piece && !piece.used && canPlacePiece(p.board, piece, hoverRow, hoverCol)) {
           boardSquash = 1;
           p.onPlacePiece(p.selectedPieceIndex, hoverRow, hoverCol);
+          hoverRow = -1;
+          hoverCol = -1;
         }
       }
       requestRedrawRef.current();
@@ -1236,10 +1290,10 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         }
       }
 
-      // 5. Render Ghost Placement Preview + Clear-Line Projections
+      // 5. Render High-Transparency 'Ghost' Piece Projection + Clear-Line Projections
       if (p.shellState === 'playing') {
-        const previewR = hoverRow >= 0 ? hoverRow : cursorRow;
-        const previewC = hoverCol >= 0 ? hoverCol : cursorCol;
+        let previewR = hoverRow >= 0 ? hoverRow : cursorRow;
+        let previewC = hoverCol >= 0 ? hoverCol : cursorCol;
 
         if (p.activeTargetingBooster && previewR >= 0 && previewC >= 0) {
           const isBomb = p.activeTargetingBooster === 'bomb_blast';
@@ -1263,77 +1317,239 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           }
         } else {
           const piece = p.tray[p.selectedPieceIndex];
-          if (piece && !piece.used && previewR >= 0 && previewC >= 0) {
-            const valid = canPlacePiece(p.board, piece, previewR, previewC);
-
-            // Highlight Projected Line Clears when placement is valid!
-            if (valid) {
-              const projected = getProjectedClearLines(p.board, piece, previewR, previewC);
-              const projPulse = 0.32 + 0.22 * Math.sin(simTime * 10);
-
-              for (const pr of projected.rows) {
-                const ry = layout.boardTop + pr * layout.cellSize;
-                ctx.fillStyle = `rgba(253, 230, 138, ${projPulse.toFixed(2)})`;
-                ctx.fillRect(layout.boardLeft, ry + 2, layout.boardPx, layout.cellSize - 4);
-                ctx.strokeStyle = '#FDE68A';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(
-                  layout.boardLeft + 1,
-                  ry + 2,
-                  layout.boardPx - 2,
-                  layout.cellSize - 4
-                );
-              }
-
-              for (const pc of projected.cols) {
-                const rx = layout.boardLeft + pc * layout.cellSize;
-                ctx.fillStyle = `rgba(110, 231, 183, ${projPulse.toFixed(2)})`;
-                ctx.fillRect(rx + 2, layout.boardTop, layout.cellSize - 4, layout.boardPx);
-                ctx.strokeStyle = '#6EE7B7';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(
-                  rx + 2,
-                  layout.boardTop + 1,
-                  layout.cellSize - 4,
-                  layout.boardPx - 2
-                );
+          if (piece && !piece.used) {
+            // Ensure non-hovered cursor always snaps to a valid placement cell for the selected piece
+            if (hoverRow < 0 && !canPlacePiece(p.board, piece, previewR, previewC)) {
+              const bestSnap = findBestValidPlacement(p.board, piece);
+              if (bestSnap) {
+                cursorRow = bestSnap.row;
+                cursorCol = bestSnap.col;
+                previewR = bestSnap.row;
+                previewC = bestSnap.col;
               }
             }
 
-            // Render Ghost Piece Preview on Grid
-            for (let dr = 0; dr < piece.matrix.length; dr++) {
-              for (let dc = 0; dc < piece.matrix[0].length; dc++) {
-                if (piece.matrix[dr][dc] === 1) {
-                  const r = previewR + dr;
-                  const c = previewC + dc;
-                  if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
-                    const cx = layout.boardLeft + c * layout.cellSize;
-                    const cy = layout.boardTop + r * layout.cellSize;
-                    if (valid) {
+            if (previewR >= 0 && previewC >= 0) {
+              const valid = canPlacePiece(p.board, piece, previewR, previewC);
+              const projected = valid
+                ? getProjectedClearLines(p.board, piece, previewR, previewC)
+                : { rows: [], cols: [] };
+              const totalProjectedLines = projected.rows.length + projected.cols.length;
+              const ghostPulse = 0.5 + 0.5 * Math.sin(simTime * 7);
+
+              // 5A. Highlight Projected Line Clears (Full Row/Col Beams + Per-Cell Clear Frames)
+              if (valid && totalProjectedLines > 0) {
+                const beamAlpha = 0.24 + 0.18 * ghostPulse;
+
+                for (const pr of projected.rows) {
+                  const ry = layout.boardTop + pr * layout.cellSize;
+                  const rowGrad = ctx.createLinearGradient(
+                    layout.boardLeft,
+                    ry,
+                    layout.boardLeft + layout.boardPx,
+                    ry
+                  );
+                  rowGrad.addColorStop(0, `rgba(253, 230, 138, ${(beamAlpha * 0.65).toFixed(2)})`);
+                  rowGrad.addColorStop(0.5, `rgba(254, 240, 138, ${(beamAlpha * 1.25).toFixed(2)})`);
+                  rowGrad.addColorStop(1, `rgba(253, 230, 138, ${(beamAlpha * 0.65).toFixed(2)})`);
+
+                  ctx.fillStyle = rowGrad;
+                  ctx.fillRect(layout.boardLeft + 1, ry + 1, layout.boardPx - 2, layout.cellSize - 2);
+
+                  ctx.strokeStyle = '#FEF08A';
+                  ctx.lineWidth = 2.2;
+                  ctx.strokeRect(
+                    layout.boardLeft + 1.5,
+                    ry + 1.5,
+                    layout.boardPx - 3,
+                    layout.cellSize - 3
+                  );
+
+                  // Highlight each existing cell in the clearing row
+                  for (let c = 0; c < BOARD_SIZE; c++) {
+                    const cellX = layout.boardLeft + c * layout.cellSize;
+                    ctx.fillStyle = `rgba(254, 249, 195, ${(0.18 + 0.14 * ghostPulse).toFixed(2)})`;
+                    ctx.beginPath();
+                    ctx.roundRect(cellX + 3, ry + 3, layout.cellSize - 6, layout.cellSize - 6, 4);
+                    ctx.fill();
+                  }
+                }
+
+                for (const pc of projected.cols) {
+                  const rx = layout.boardLeft + pc * layout.cellSize;
+                  const colGrad = ctx.createLinearGradient(
+                    rx,
+                    layout.boardTop,
+                    rx,
+                    layout.boardTop + layout.boardPx
+                  );
+                  colGrad.addColorStop(0, `rgba(110, 231, 183, ${(beamAlpha * 0.65).toFixed(2)})`);
+                  colGrad.addColorStop(0.5, `rgba(167, 243, 208, ${(beamAlpha * 1.25).toFixed(2)})`);
+                  colGrad.addColorStop(1, `rgba(110, 231, 183, ${(beamAlpha * 0.65).toFixed(2)})`);
+
+                  ctx.fillStyle = colGrad;
+                  ctx.fillRect(rx + 1, layout.boardTop + 1, layout.cellSize - 2, layout.boardPx - 2);
+
+                  ctx.strokeStyle = '#6EE7B7';
+                  ctx.lineWidth = 2.2;
+                  ctx.strokeRect(
+                    rx + 1.5,
+                    layout.boardTop + 1.5,
+                    layout.cellSize - 3,
+                    layout.boardPx - 3
+                  );
+
+                  // Highlight each existing cell in the clearing column
+                  for (let r = 0; r < BOARD_SIZE; r++) {
+                    const cellY = layout.boardTop + r * layout.cellSize;
+                    ctx.fillStyle = `rgba(209, 250, 229, ${(0.18 + 0.14 * ghostPulse).toFixed(2)})`;
+                    ctx.beginPath();
+                    ctx.roundRect(rx + 3, cellY + 3, layout.cellSize - 6, layout.cellSize - 6, 4);
+                    ctx.fill();
+                  }
+                }
+              }
+
+              // 5B. Render Snapped High-Transparency 'Ghost' Piece Cells
+              const s = layout.cellSize;
+              const bracketLen = Math.max(5, Math.floor(s * 0.22));
+
+              for (let dr = 0; dr < piece.matrix.length; dr++) {
+                for (let dc = 0; dc < piece.matrix[0].length; dc++) {
+                  if (piece.matrix[dr][dc] === 1) {
+                    const r = previewR + dr;
+                    const c = previewC + dc;
+                    if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                      const cx = layout.boardLeft + c * s;
+                      const cy = layout.boardTop + r * s;
                       const mod = piece.modifiers.find((m) => m.dr === dr && m.dc === dc);
-                      drawRelicBlock(
-                        cx,
-                        cy,
-                        layout.cellSize,
-                        piece.color,
-                        mod ? mod.kind : 'normal',
-                        mod?.frozenLayers ?? 2,
-                        mod?.bombTimer ?? 5,
-                        p.themeId,
-                        0.62,
-                        0.98
-                      );
-                      ctx.strokeStyle = '#FEF08A';
-                      ctx.lineWidth = 2;
-                      ctx.strokeRect(cx + 2, cy + 2, layout.cellSize - 4, layout.cellSize - 4);
-                    } else {
-                      ctx.fillStyle = 'rgba(239, 68, 68, 0.25)';
-                      ctx.strokeStyle = 'rgba(248, 113, 113, 0.78)';
-                      ctx.lineWidth = 1.6;
-                      ctx.strokeRect(cx + 3, cy + 3, layout.cellSize - 6, layout.cellSize - 6);
+
+                      if (valid) {
+                        // High-transparency spectral block projection (0.36 alpha)
+                        drawRelicBlock(
+                          cx,
+                          cy,
+                          s,
+                          piece.color,
+                          mod ? mod.kind : 'normal',
+                          mod?.frozenLayers ?? 2,
+                          mod?.bombTimer ?? 5,
+                          p.themeId,
+                          0.36 + 0.08 * ghostPulse,
+                          0.94
+                        );
+
+                        // Luminous Ghost Landing Wash
+                        ctx.save();
+                        ctx.fillStyle =
+                          totalProjectedLines > 0
+                            ? 'rgba(254, 240, 138, 0.18)'
+                            : 'rgba(110, 231, 183, 0.12)';
+                        ctx.beginPath();
+                        ctx.roundRect(cx + 2.5, cy + 2.5, s - 5, s - 5, 5);
+                        ctx.fill();
+
+                        // Dashed Ghost Inner Silhouette
+                        ctx.strokeStyle =
+                          totalProjectedLines > 0
+                            ? 'rgba(254, 240, 138, 0.72)'
+                            : 'rgba(167, 243, 208, 0.62)';
+                        ctx.lineWidth = 1.25;
+                        ctx.setLineDash([4, 3]);
+                        ctx.strokeRect(cx + 3.5, cy + 3.5, s - 7, s - 7);
+                        ctx.setLineDash([]);
+
+                        // 4 Tactile Corner Snap Brackets
+                        ctx.strokeStyle = totalProjectedLines > 0 ? '#FEF08A' : '#6EE7B7';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        // Top-left bracket
+                        ctx.moveTo(cx + 2, cy + 2 + bracketLen);
+                        ctx.lineTo(cx + 2, cy + 2);
+                        ctx.lineTo(cx + 2 + bracketLen, cy + 2);
+                        // Top-right bracket
+                        ctx.moveTo(cx + s - 2 - bracketLen, cy + 2);
+                        ctx.lineTo(cx + s - 2, cy + 2);
+                        ctx.lineTo(cx + s - 2, cy + 2 + bracketLen);
+                        // Bottom-right bracket
+                        ctx.moveTo(cx + s - 2, cy + s - 2 - bracketLen);
+                        ctx.lineTo(cx + s - 2, cy + s - 2);
+                        ctx.lineTo(cx + s - 2 - bracketLen, cy + s - 2);
+                        // Bottom-left bracket
+                        ctx.moveTo(cx + 2 + bracketLen, cy + s - 2);
+                        ctx.lineTo(cx + 2, cy + s - 2);
+                        ctx.lineTo(cx + 2, cy + s - 2 - bracketLen);
+                        ctx.stroke();
+
+                        // Center Snap Reticle Dot
+                        ctx.fillStyle = totalProjectedLines > 0 ? '#FEF08A' : '#A7F3D0';
+                        ctx.beginPath();
+                        ctx.arc(cx + s / 2, cy + s / 2, 2.2, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.restore();
+                      } else {
+                        // Obstructed Ghost Footprint (High-Transparency + Crimson Invalid Indicator)
+                        drawRelicBlock(
+                          cx,
+                          cy,
+                          s,
+                          piece.color,
+                          mod ? mod.kind : 'normal',
+                          mod?.frozenLayers ?? 2,
+                          mod?.bombTimer ?? 5,
+                          p.themeId,
+                          0.2,
+                          0.92
+                        );
+                        ctx.save();
+                        ctx.fillStyle = 'rgba(239, 68, 68, 0.24)';
+                        ctx.beginPath();
+                        ctx.roundRect(cx + 2.5, cy + 2.5, s - 5, s - 5, 5);
+                        ctx.fill();
+
+                        ctx.strokeStyle = 'rgba(248, 113, 113, 0.85)';
+                        ctx.lineWidth = 1.6;
+                        ctx.setLineDash([4, 3]);
+                        ctx.strokeRect(cx + 3, cy + 3, s - 6, s - 6);
+                        ctx.setLineDash([]);
+                        ctx.restore();
+                      }
                     }
                   }
                 }
+              }
+
+              // 5C. Floating Line-Clear Projection Tag Above Ghost Piece
+              if (valid && totalProjectedLines > 0) {
+                const ghostCenterX =
+                  layout.boardLeft + (previewC + piece.matrix[0].length * 0.5) * s;
+                const ghostTopY = Math.max(
+                  layout.boardTop + 14,
+                  layout.boardTop + previewR * s - 10
+                );
+                const label =
+                  totalProjectedLines >= 2
+                    ? `CLEAR x${totalProjectedLines}!`
+                    : 'LINE CLEAR!';
+
+                ctx.save();
+                ctx.font = '800 10.5px "JetBrains Mono", monospace';
+                const textW = ctx.measureText(label).width;
+                const pillW = textW + 14;
+                const pillH = 18;
+                ctx.fillStyle = 'rgba(6, 20, 15, 0.92)';
+                ctx.strokeStyle = '#FEF08A';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.roundRect(ghostCenterX - pillW / 2, ghostTopY - pillH / 2, pillW, pillH, 9);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#FEF08A';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(label, ghostCenterX, ghostTopY + 0.5);
+                ctx.restore();
               }
             }
           }
