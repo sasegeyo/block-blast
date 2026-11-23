@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import {
   BOARD_SIZE,
+  BLOCK_COLORS,
   BlockColor,
   BoosterType,
   GridArchitecture,
@@ -34,9 +35,10 @@ interface RelicBoardCanvasProps {
   architecture: GridArchitecture;
   tray: TrayPiece[];
   selectedPieceIndex: number;
-  activeTargetingBooster: 'hammer' | 'bomb_blast' | null;
+  activeTargetingBooster: 'hammer' | 'bomb_blast' | 'laser' | null;
   themeId: ThemeSkinId;
   burstSignal: CanvasParticleBurst | null;
+  curtainSignal?: number;
   onSelectPiece: (index: number) => void;
   onPlacePiece: (pieceIndex: number, row: number, col: number) => void;
   onUseTargetBooster: (row: number, col: number) => void;
@@ -72,6 +74,7 @@ interface PooledFloatingText {
   life: number;
   maxLife: number;
   scale: number;
+  isMini: boolean;
 }
 
 interface PooledShockwave {
@@ -93,7 +96,7 @@ interface PlacedCellBounce {
 }
 
 const MAX_PARTICLES = 220;
-const MAX_FLOATING_TEXTS = 16;
+const MAX_FLOATING_TEXTS = 36;
 const MAX_SHOCKWAVES = 16;
 const MAX_CELL_BOUNCES = 24;
 
@@ -103,6 +106,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
   propsRef.current = props;
 
   const lastBurstIdRef = useRef<number>(0);
+  const lastCurtainIdRef = useRef<number>(0);
   const requestRedrawRef = useRef<() => void>(() => {});
 
   // Trigger immediate canvas redraw whenever React props update
@@ -188,7 +192,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       p.isSpark = isSpark;
     };
 
-    // Zero-GC Pooled Floating Combo Banners
+    // Zero-GC Pooled Floating Combo Banners & Mini Tile Popups
     const floatingTexts: PooledFloatingText[] = Array.from({ length: MAX_FLOATING_TEXTS }, () => ({
       active: false,
       x: 0,
@@ -199,6 +203,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       life: 0,
       maxLife: 1.2,
       scale: 1,
+      isMini: false,
     }));
     let textHead = 0;
 
@@ -207,19 +212,32 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       y: number,
       text: string,
       color: string,
-      scale = 1.15
+      scale = 1.15,
+      isMini = false
     ) => {
       const ft = floatingTexts[textHead];
       textHead = (textHead + 1) % MAX_FLOATING_TEXTS;
       ft.active = true;
       ft.x = x;
       ft.y = y;
-      ft.vy = -56;
+      ft.vy = isMini ? -38 : -56;
       ft.text = text;
       ft.color = color;
       ft.life = 0;
-      ft.maxLife = 1.25;
+      ft.maxLife = isMini ? 0.78 : 1.25;
       ft.scale = scale;
+      ft.isMini = isMini;
+    };
+
+    // 8x8 Rainbow Curtain Wipe Animation State
+    const curtainPalette: BlockColor[] = BLOCK_COLORS;
+    const curtainAnim = {
+      active: false,
+      progress: 0,
+      duration: 0.72,
+      colors: Array.from({ length: BOARD_SIZE }, (_, r) =>
+        Array.from({ length: BOARD_SIZE }, (_, c) => curtainPalette[(r + c) % curtainPalette.length])
+      ),
     };
 
     // Zero-GC Pooled Shockwaves (Row Beams, Col Beams & Blast Rings)
@@ -522,7 +540,12 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       pointerX = pt.x;
       pointerY = pt.y;
       if (propsRef.current.shellState === 'playing') {
+        const prevR = hoverRow;
+        const prevC = hoverCol;
         updateHoverGridFromPointer(pt.x, pt.y, isDragging);
+        if (isDragging && hoverRow >= 0 && hoverCol >= 0 && (hoverRow !== prevR || hoverCol !== prevC)) {
+          soundSynth.playTick();
+        }
         requestRedrawRef.current();
       }
     };
@@ -602,6 +625,12 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       } else if (code === 'KeyB') {
         e.preventDefault();
         p.onActivateBoosterMode('bomb_blast');
+      } else if (code === 'KeyL') {
+        e.preventDefault();
+        p.onActivateBoosterMode('laser');
+      } else if (code === 'KeyG') {
+        e.preventDefault();
+        p.onActivateBoosterMode('single_star');
       } else if (code === 'ArrowUp' || code === 'KeyW') {
         e.preventDefault();
         cursorRow = Math.max(0, cursorRow - 1);
@@ -674,7 +703,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
 
     /**
      * Renders a High-Fidelity 3D Beveled & Glossy Gem Relic Block
-     * with Dynamic Obstacle & Opportunity states (Frozen Cracks, Neon Fuse Bomb, Chromatic Wildcard).
+     * with Dynamic Obstacle & Opportunity states (Frozen Cracks, Neon Fuse Bomb, Chromatic Wildcard, Embedded Gem Star).
      */
     const drawRelicBlock = (
       x: number,
@@ -686,9 +715,10 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       bombTimer: number,
       themeId: ThemeSkinId,
       alpha: number = 1,
-      scaleFactor: number = 1
+      scaleFactor: number = 1,
+      hasGem: boolean = false
     ) => {
-      const theme = THEME_SKINS[themeId] || THEME_SKINS.mystic_forest;
+      const theme = THEME_SKINS[themeId] || THEME_SKINS.pastel_blast;
       const palette = theme.blocks[colorKey] || theme.blocks.emerald;
       const pad = Math.max(1.5, size * 0.045);
       const rawBs = size - pad * 2;
@@ -797,6 +827,31 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerS - 1, innerS - 1);
       }
 
+      // 5B. Embedded Adventure Gem Star (Block Blast Pastel Edition feature)
+      if (hasGem && kind === 'normal') {
+        const cx = bx + bs * 0.5;
+        const cy = by + bs * 0.5;
+        const outerR = bs * 0.28;
+        const innerR = bs * 0.13;
+        ctx.save();
+        ctx.fillStyle = '#FFF6A9';
+        ctx.strokeStyle = '#C97A00';
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const rad = i % 2 === 0 ? outerR : innerR;
+          const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+          const px = cx + Math.cos(angle) * rad;
+          const py = cy + Math.sin(angle) * rad;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // 6. Dynamic Obstacle & Opportunity Overlays
       if (kind === 'frozen') {
         // Multi-stage Icy Glaze & Realistic Frost Cracks
@@ -820,19 +875,16 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         ctx.strokeStyle = '#FFFFFF';
         ctx.lineWidth = 1.6;
         ctx.beginPath();
-        // Stage 1 crack (always visible)
         ctx.moveTo(bx + 4, by + 5);
         ctx.lineTo(bx + bs * 0.46, by + bs * 0.44);
         ctx.lineTo(bx + bs - 5, by + 7);
         if (frozenLayers <= 2) {
-          // Stage 2 branching fracture
           ctx.moveTo(bx + bs * 0.46, by + bs * 0.44);
           ctx.lineTo(bx + bs * 0.32, by + bs - 5);
           ctx.moveTo(bx + 5, by + bs * 0.62);
           ctx.lineTo(bx + bs * 0.46, by + bs * 0.44);
         }
         if (frozenLayers === 1) {
-          // Stage 3 critical shatterspiderweb
           ctx.moveTo(bx + bs * 0.46, by + bs * 0.44);
           ctx.lineTo(bx + bs - 4, by + bs - 6);
           ctx.moveTo(bx + bs * 0.72, by + bs * 0.28);
@@ -873,7 +925,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           ctx.fillText(`${frozenLayers}`, bx + bs - 8.5, by + bs - 8);
         }
       } else if (kind === 'bomb') {
-        // Bomb Block with Active Pulsating Neon Fuse & Danger Escalation (timer <= 2)
         const urgent = bombTimer <= 2;
         const pulse = 0.5 + 0.5 * Math.sin(simTime * (urgent ? 16 : 6));
 
@@ -892,7 +943,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         const cy = by + bs * 0.55;
         const radius = bs * 0.31;
 
-        // Fuse Cord + Pulsating Neon Spark Tip
         const fuseEndX = cx + radius * 0.85;
         const fuseEndY = cy - radius * 0.95;
         ctx.strokeStyle = '#FBBF24';
@@ -902,7 +952,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         ctx.quadraticCurveTo(cx + radius * 0.9, cy - radius * 0.7, fuseEndX, fuseEndY);
         ctx.stroke();
 
-        // Neon Fuse Spark Glow
         const sparkR = (urgent ? 3.8 : 2.6) + pulse * 1.8;
         ctx.fillStyle = urgent ? '#EF4444' : '#F59E0B';
         ctx.beginPath();
@@ -913,7 +962,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         ctx.arc(fuseEndX, fuseEndY, sparkR * 0.65, 0, Math.PI * 2);
         ctx.fill();
 
-        // Metallic Bomb Sphere
         const bombGrad = ctx.createRadialGradient(
           cx - radius * 0.3,
           cy - radius * 0.3,
@@ -933,14 +981,12 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         ctx.lineWidth = 1.5;
         ctx.stroke();
 
-        // Animated Countdown Numeral
         ctx.fillStyle = urgent ? '#FEF08A' : '#FFFFFF';
         ctx.font = `800 ${Math.max(10, Math.floor(bs * 0.34))}px "JetBrains Mono", monospace`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(`${bombTimer}`, cx, cy + 1);
       } else if (kind === 'wildcard') {
-        // Chromatic Sheen Border + Rotating Prismatic Star
         const cx = bx + bs / 2;
         const cy = by + bs / 2;
         const outerR = bs * 0.33;
@@ -983,10 +1029,31 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
 
       const p = propsRef.current;
-      const theme = THEME_SKINS[p.themeId] || THEME_SKINS.mystic_forest;
+      const theme = THEME_SKINS[p.themeId] || THEME_SKINS.pastel_blast;
       const layout = computeLayout();
 
-      // Process Incoming Burst, Shockwaves, Cell Bounces & Floating Combo Banners
+      // Trigger 8x8 Rainbow Curtain Wipe when curtainSignal increments
+      if (p.curtainSignal && p.curtainSignal !== lastCurtainIdRef.current) {
+        lastCurtainIdRef.current = p.curtainSignal;
+        curtainAnim.active = true;
+        curtainAnim.progress = 0;
+        for (let r = 0; r < BOARD_SIZE; r++) {
+          for (let c = 0; c < BOARD_SIZE; c++) {
+            curtainAnim.colors[r][c] =
+              curtainPalette[(r + c + Math.floor(Math.random() * 2)) % curtainPalette.length];
+          }
+        }
+        soundSynth.playCurtain();
+      }
+
+      if (curtainAnim.active) {
+        curtainAnim.progress += dt / curtainAnim.duration;
+        if (curtainAnim.progress >= 1) {
+          curtainAnim.active = false;
+        }
+      }
+
+      // Process Incoming Burst, Shockwaves, Cell Bounces, Mini Popups & Floating Combo Banners
       if (p.burstSignal && p.burstSignal.id !== lastBurstIdRef.current) {
         lastBurstIdRef.current = p.burstSignal.id;
         const sig = p.burstSignal;
@@ -1021,7 +1088,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           spawnShockwave('ring', sig.ringCenter.row, sig.ringCenter.col, '#FBBF24');
         }
 
-        // Explosive Debris & Spark Particles
+        // Explosive Debris, Spark Particles & Per-Tile Mini Score Popups (+10 / +15)
+        let miniCount = 0;
         for (const cell of sig.cells) {
           const cx = layout.boardLeft + (cell.col + 0.5) * layout.cellSize;
           const cy = layout.boardTop + (cell.row + 0.5) * layout.cellSize;
@@ -1041,6 +1109,10 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
               i % 2 === 0
             );
           }
+          if ((isMedium || isHeavy) && miniCount < 10 && miniCount % 2 === 0) {
+            spawnFloatingText(cx, cy - 2, isHeavy ? '+15' : '+10', '#FFFFFF', 0.72, true);
+          }
+          miniCount++;
         }
 
         if (sig.calloutText) {
@@ -1049,7 +1121,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
             layout.boardTop + layout.boardPx * 0.42,
             sig.calloutText,
             '#FDE68A',
-            isHeavy ? 1.32 : 1.12
+            isHeavy ? 1.32 : 1.12,
+            false
           );
         }
         if (sig.secondaryBannerText) {
@@ -1058,7 +1131,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
             layout.boardTop + layout.boardPx * 0.26,
             sig.secondaryBannerText,
             '#6EE7B7',
-            1.42
+            1.42,
+            false
           );
         }
       }
@@ -1096,7 +1170,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
 
       // Subtle Carved Halo Rings around the Board
       ctx.save();
-      ctx.strokeStyle = 'rgba(217, 155, 38, 0.06)';
+      ctx.strokeStyle = 'rgba(255, 217, 90, 0.08)';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.arc(layout.boardCenterX, layout.boardCenterY, layout.boardPx * 0.66, 0, Math.PI * 2);
@@ -1133,7 +1207,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
       ctx.scale(squashScaleX, squashScaleY);
       ctx.translate(-layout.boardCenterX, -layout.boardCenterY);
 
-      // 3. Carved Stone Relic Board Frame
+      // 3. Carved Stone / Pastel Block Blast Board Frame
       const framePad = 10;
       ctx.fillStyle = '#030806';
       ctx.beginPath();
@@ -1194,7 +1268,42 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         if (cb.life >= cb.maxLife) cb.active = false;
       }
 
-      // 4. Render 8x8 Carved Grid Sockets & Placed 3D Relic Blocks
+      // Pre-compute Ghost Placement & Projected Line Clears for Block Blast Color-Shift Anticipation
+      let previewR = hoverRow >= 0 ? hoverRow : cursorRow;
+      let previewC = hoverCol >= 0 ? hoverCol : cursorCol;
+      const activePiece =
+        p.shellState === 'playing' && !p.activeTargetingBooster
+          ? p.tray[p.selectedPieceIndex]
+          : null;
+
+      if (
+        activePiece &&
+        !activePiece.used &&
+        hoverRow < 0 &&
+        !canPlacePiece(p.board, activePiece, previewR, previewC)
+      ) {
+        const bestSnap = findBestValidPlacement(p.board, activePiece);
+        if (bestSnap) {
+          cursorRow = bestSnap.row;
+          cursorCol = bestSnap.col;
+          previewR = bestSnap.row;
+          previewC = bestSnap.col;
+        }
+      }
+
+      const validGhostPlacement =
+        Boolean(activePiece && !activePiece.used && previewR >= 0 && previewC >= 0) &&
+        canPlacePiece(p.board, activePiece!, previewR, previewC);
+
+      const projectedLines =
+        validGhostPlacement && activePiece
+          ? getProjectedClearLines(p.board, activePiece, previewR, previewC)
+          : { rows: [], cols: [] };
+
+      const projectedRowSet = new Set(projectedLines.rows);
+      const projectedColSet = new Set(projectedLines.cols);
+
+      // 4. Render 8x8 Carved / Checkerboard Grid Sockets & Placed 3D Blocks
       for (let r = 0; r < BOARD_SIZE; r++) {
         for (let c = 0; c < BOARD_SIZE; c++) {
           const cell = p.board[r][c];
@@ -1213,15 +1322,18 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
             continue;
           }
 
-          // Recessed Carved Stone Socket Base
-          ctx.fillStyle = theme.cellEmptyFill;
+          // Recessed Carved / Checkerboard Socket Base
+          const isEvenCell = (r + c) % 2 === 0;
+          ctx.fillStyle = isEvenCell
+            ? theme.cellEmptyFill
+            : theme.cellEmptyFillAlt || theme.cellEmptyFill;
           ctx.beginPath();
           ctx.roundRect(cx + 1.5, cy + 1.5, s - 3, s - 3, 5.5);
           ctx.fill();
 
           // Recessed Inner Top-Left Shadow
-          ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
-          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+          ctx.lineWidth = 1.4;
           ctx.beginPath();
           ctx.moveTo(cx + 2.5, cy + s - 3);
           ctx.lineTo(cx + 2.5, cy + 2.5);
@@ -1239,7 +1351,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
 
           // Faint Etched Center Rune Dot inside empty socket
           if (cell.kind === 'empty' && p.shellState !== 'title') {
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.045)';
             ctx.beginPath();
             ctx.arc(cx + s / 2, cy + s / 2, 2, 0, Math.PI * 2);
             ctx.fill();
@@ -1269,288 +1381,349 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
                 2,
                 p.themeId,
                 Math.min(1, (wave - 0.35) * 2.2),
-                1
+                1,
+                r === 3 && c === 3
               );
             }
           } else if (cell.kind !== 'empty') {
             const bScale = getCellBounceScale(r, c);
+            const isAnticipatingClear =
+              validGhostPlacement &&
+              activePiece &&
+              (projectedRowSet.has(r) || projectedColSet.has(c));
+
+            // Block Blast Color-Shift Line Anticipation: shift clearing line blocks to the active piece's color!
+            const displayColor =
+              isAnticipatingClear && activePiece ? activePiece.color : cell.color;
+
             drawRelicBlock(
               cx,
               cy,
               s,
-              cell.color,
+              displayColor,
               cell.kind,
               cell.frozenLayers,
               cell.bombTimer,
               p.themeId,
               1,
-              bScale
+              isAnticipatingClear ? Math.max(bScale, 1.03) : bScale,
+              Boolean(cell.hasGem)
             );
+
+            if (isAnticipatingClear) {
+              ctx.save();
+              ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)';
+              ctx.lineWidth = 2.2;
+              ctx.beginPath();
+              ctx.roundRect(cx + 2, cy + 2, s - 4, s - 4, 5);
+              ctx.stroke();
+              ctx.restore();
+            }
           }
         }
       }
 
-      // 5. Render High-Transparency 'Ghost' Piece Projection + Clear-Line Projections
+      // 5. Render High-Transparency 'Ghost' Piece Projection + Clear-Line Projections + Booster Aiming
       if (p.shellState === 'playing') {
-        let previewR = hoverRow >= 0 ? hoverRow : cursorRow;
-        let previewC = hoverCol >= 0 ? hoverCol : cursorCol;
-
         if (p.activeTargetingBooster && previewR >= 0 && previewC >= 0) {
-          const isBomb = p.activeTargetingBooster === 'bomb_blast';
-          const minR = isBomb ? Math.max(0, previewR - 1) : previewR;
-          const maxR = isBomb ? Math.min(BOARD_SIZE - 1, previewR + 1) : previewR;
-          const minC = isBomb ? Math.max(0, previewC - 1) : previewC;
-          const maxC = isBomb ? Math.min(BOARD_SIZE - 1, previewC + 1) : previewC;
-
-          for (let r = minR; r <= maxR; r++) {
-            for (let c = minC; c <= maxC; c++) {
-              const cx = layout.boardLeft + c * layout.cellSize;
-              const cy = layout.boardTop + r * layout.cellSize;
-              ctx.fillStyle = 'rgba(239, 68, 68, 0.34)';
-              ctx.strokeStyle = '#FEF08A';
-              ctx.lineWidth = 2.2;
+          if (p.activeTargetingBooster === 'laser') {
+            // Cross-Laser Full Row + Full Column Highlight
+            for (let i = 0; i < BOARD_SIZE; i++) {
+              const rowX = layout.boardLeft + i * layout.cellSize;
+              const rowY = layout.boardTop + previewR * layout.cellSize;
+              ctx.fillStyle = 'rgba(56, 189, 248, 0.34)';
+              ctx.strokeStyle = '#66E8FF';
+              ctx.lineWidth = 2;
               ctx.beginPath();
-              ctx.roundRect(cx + 2, cy + 2, layout.cellSize - 4, layout.cellSize - 4, 5);
+              ctx.roundRect(rowX + 2, rowY + 2, layout.cellSize - 4, layout.cellSize - 4, 5);
               ctx.fill();
               ctx.stroke();
+
+              if (i !== previewR) {
+                const colX = layout.boardLeft + previewC * layout.cellSize;
+                const colY = layout.boardTop + i * layout.cellSize;
+                ctx.beginPath();
+                ctx.roundRect(colX + 2, colY + 2, layout.cellSize - 4, layout.cellSize - 4, 5);
+                ctx.fill();
+                ctx.stroke();
+              }
+            }
+          } else {
+            const isBomb = p.activeTargetingBooster === 'bomb_blast';
+            const minR = isBomb ? Math.max(0, previewR - 1) : previewR;
+            const maxR = isBomb ? Math.min(BOARD_SIZE - 1, previewR + 1) : previewR;
+            const minC = isBomb ? Math.max(0, previewC - 1) : previewC;
+            const maxC = isBomb ? Math.min(BOARD_SIZE - 1, previewC + 1) : previewC;
+
+            for (let r = minR; r <= maxR; r++) {
+              for (let c = minC; c <= maxC; c++) {
+                const cx = layout.boardLeft + c * layout.cellSize;
+                const cy = layout.boardTop + r * layout.cellSize;
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.34)';
+                ctx.strokeStyle = '#FEF08A';
+                ctx.lineWidth = 2.2;
+                ctx.beginPath();
+                ctx.roundRect(cx + 2, cy + 2, layout.cellSize - 4, layout.cellSize - 4, 5);
+                ctx.fill();
+                ctx.stroke();
+              }
+            }
+          }
+        } else if (activePiece && !activePiece.used && previewR >= 0 && previewC >= 0) {
+          const piece = activePiece;
+          const valid = validGhostPlacement;
+          const projected = projectedLines;
+          const totalProjectedLines = projected.rows.length + projected.cols.length;
+          const ghostPulse = 0.5 + 0.5 * Math.sin(simTime * 7);
+
+          // 5A. Highlight Projected Line Clears (Full Row/Col Beams + Per-Cell Clear Frames)
+          if (valid && totalProjectedLines > 0) {
+            const beamAlpha = 0.24 + 0.18 * ghostPulse;
+
+            for (const pr of projected.rows) {
+              const ry = layout.boardTop + pr * layout.cellSize;
+              const rowGrad = ctx.createLinearGradient(
+                layout.boardLeft,
+                ry,
+                layout.boardLeft + layout.boardPx,
+                ry
+              );
+              rowGrad.addColorStop(0, `rgba(253, 230, 138, ${(beamAlpha * 0.65).toFixed(2)})`);
+              rowGrad.addColorStop(0.5, `rgba(254, 240, 138, ${(beamAlpha * 1.25).toFixed(2)})`);
+              rowGrad.addColorStop(1, `rgba(253, 230, 138, ${(beamAlpha * 0.65).toFixed(2)})`);
+
+              ctx.fillStyle = rowGrad;
+              ctx.fillRect(layout.boardLeft + 1, ry + 1, layout.boardPx - 2, layout.cellSize - 2);
+
+              ctx.strokeStyle = '#FEF08A';
+              ctx.lineWidth = 2.2;
+              ctx.strokeRect(
+                layout.boardLeft + 1.5,
+                ry + 1.5,
+                layout.boardPx - 3,
+                layout.cellSize - 3
+              );
+            }
+
+            for (const pc of projected.cols) {
+              const rx = layout.boardLeft + pc * layout.cellSize;
+              const colGrad = ctx.createLinearGradient(
+                rx,
+                layout.boardTop,
+                rx,
+                layout.boardTop + layout.boardPx
+              );
+              colGrad.addColorStop(0, `rgba(110, 231, 183, ${(beamAlpha * 0.65).toFixed(2)})`);
+              colGrad.addColorStop(0.5, `rgba(167, 243, 208, ${(beamAlpha * 1.25).toFixed(2)})`);
+              colGrad.addColorStop(1, `rgba(110, 231, 183, ${(beamAlpha * 0.65).toFixed(2)})`);
+
+              ctx.fillStyle = colGrad;
+              ctx.fillRect(rx + 1, layout.boardTop + 1, layout.cellSize - 2, layout.boardPx - 2);
+
+              ctx.strokeStyle = '#6EE7B7';
+              ctx.lineWidth = 2.2;
+              ctx.strokeRect(
+                rx + 1.5,
+                layout.boardTop + 1.5,
+                layout.cellSize - 3,
+                layout.boardPx - 3
+              );
+            }
+          }
+
+          // 5B. Render Snapped High-Transparency 'Ghost' Piece Cells
+          const s = layout.cellSize;
+          const bracketLen = Math.max(5, Math.floor(s * 0.22));
+
+          for (let dr = 0; dr < piece.matrix.length; dr++) {
+            for (let dc = 0; dc < piece.matrix[0].length; dc++) {
+              if (piece.matrix[dr][dc] === 1) {
+                const r = previewR + dr;
+                const c = previewC + dc;
+                if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                  const cx = layout.boardLeft + c * s;
+                  const cy = layout.boardTop + r * s;
+                  const mod = piece.modifiers.find((m) => m.dr === dr && m.dc === dc);
+
+                  if (valid) {
+                    drawRelicBlock(
+                      cx,
+                      cy,
+                      s,
+                      piece.color,
+                      mod ? mod.kind : 'normal',
+                      mod?.frozenLayers ?? 2,
+                      mod?.bombTimer ?? 5,
+                      p.themeId,
+                      0.38 + 0.08 * ghostPulse,
+                      0.94,
+                      Boolean(mod?.hasGem)
+                    );
+
+                    ctx.save();
+                    ctx.fillStyle =
+                      totalProjectedLines > 0
+                        ? 'rgba(254, 240, 138, 0.18)'
+                        : 'rgba(110, 231, 183, 0.12)';
+                    ctx.beginPath();
+                    ctx.roundRect(cx + 2.5, cy + 2.5, s - 5, s - 5, 5);
+                    ctx.fill();
+
+                    ctx.strokeStyle =
+                      totalProjectedLines > 0
+                        ? 'rgba(254, 240, 138, 0.72)'
+                        : 'rgba(167, 243, 208, 0.62)';
+                    ctx.lineWidth = 1.25;
+                    ctx.setLineDash([4, 3]);
+                    ctx.strokeRect(cx + 3.5, cy + 3.5, s - 7, s - 7);
+                    ctx.setLineDash([]);
+
+                    // 4 Tactile Corner Snap Brackets
+                    ctx.strokeStyle = totalProjectedLines > 0 ? '#FEF08A' : '#6EE7B7';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(cx + 2, cy + 2 + bracketLen);
+                    ctx.lineTo(cx + 2, cy + 2);
+                    ctx.lineTo(cx + 2 + bracketLen, cy + 2);
+                    ctx.moveTo(cx + s - 2 - bracketLen, cy + 2);
+                    ctx.lineTo(cx + s - 2, cy + 2);
+                    ctx.lineTo(cx + s - 2, cy + 2 + bracketLen);
+                    ctx.moveTo(cx + s - 2, cy + s - 2 - bracketLen);
+                    ctx.lineTo(cx + s - 2, cy + s - 2);
+                    ctx.lineTo(cx + s - 2 - bracketLen, cy + s - 2);
+                    ctx.moveTo(cx + 2 + bracketLen, cy + s - 2);
+                    ctx.lineTo(cx + 2, cy + s - 2);
+                    ctx.lineTo(cx + 2, cy + s - 2 - bracketLen);
+                    ctx.stroke();
+
+                    ctx.fillStyle = totalProjectedLines > 0 ? '#FEF08A' : '#A7F3D0';
+                    ctx.beginPath();
+                    ctx.arc(cx + s / 2, cy + s / 2, 2.2, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                  } else {
+                    drawRelicBlock(
+                      cx,
+                      cy,
+                      s,
+                      piece.color,
+                      mod ? mod.kind : 'normal',
+                      mod?.frozenLayers ?? 2,
+                      mod?.bombTimer ?? 5,
+                      p.themeId,
+                      0.2,
+                      0.92,
+                      Boolean(mod?.hasGem)
+                    );
+                    ctx.save();
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.24)';
+                    ctx.beginPath();
+                    ctx.roundRect(cx + 2.5, cy + 2.5, s - 5, s - 5, 5);
+                    ctx.fill();
+
+                    ctx.strokeStyle = 'rgba(248, 113, 113, 0.85)';
+                    ctx.lineWidth = 1.6;
+                    ctx.setLineDash([4, 3]);
+                    ctx.strokeRect(cx + 3, cy + 3, s - 6, s - 6);
+                    ctx.setLineDash([]);
+                    ctx.restore();
+                  }
+                }
+              }
+            }
+          }
+
+          // 5C. Floating Line-Clear Projection Tag Above Ghost Piece
+          if (valid && totalProjectedLines > 0) {
+            const ghostCenterX =
+              layout.boardLeft + (previewC + piece.matrix[0].length * 0.5) * s;
+            const ghostTopY = Math.max(
+              layout.boardTop + 14,
+              layout.boardTop + previewR * s - 10
+            );
+            const label =
+              totalProjectedLines >= 2
+                ? `CLEAR x${totalProjectedLines}!`
+                : 'LINE CLEAR!';
+
+            ctx.save();
+            ctx.font = '800 10.5px "JetBrains Mono", monospace';
+            const textW = ctx.measureText(label).width;
+            const pillW = textW + 14;
+            const pillH = 18;
+            ctx.fillStyle = 'rgba(6, 20, 15, 0.92)';
+            ctx.strokeStyle = '#FEF08A';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.roundRect(ghostCenterX - pillW / 2, ghostTopY - pillH / 2, pillW, pillH, 9);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#FEF08A';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, ghostCenterX, ghostTopY + 0.5);
+            ctx.restore();
+          }
+        }
+      }
+
+      // 5D. Iconic 8x8 Block Blast Rainbow Curtain Wipe Overlay
+      if (curtainAnim.active) {
+        const pProg = curtainAnim.progress;
+        let fillRows = 0;
+        if (pProg < 0.46) {
+          fillRows = Math.ceil((pProg / 0.46) * BOARD_SIZE);
+          for (let r = BOARD_SIZE - 1; r >= BOARD_SIZE - fillRows; r--) {
+            for (let c = 0; c < BOARD_SIZE; c++) {
+              drawRelicBlock(
+                layout.boardLeft + c * layout.cellSize,
+                layout.boardTop + r * layout.cellSize,
+                layout.cellSize,
+                curtainAnim.colors[r][c],
+                'normal',
+                0,
+                0,
+                p.themeId,
+                1,
+                1
+              );
+            }
+          }
+        } else if (pProg < 0.56) {
+          for (let r = 0; r < BOARD_SIZE; r++) {
+            for (let c = 0; c < BOARD_SIZE; c++) {
+              drawRelicBlock(
+                layout.boardLeft + c * layout.cellSize,
+                layout.boardTop + r * layout.cellSize,
+                layout.cellSize,
+                curtainAnim.colors[r][c],
+                'normal',
+                0,
+                0,
+                p.themeId,
+                1,
+                1
+              );
             }
           }
         } else {
-          const piece = p.tray[p.selectedPieceIndex];
-          if (piece && !piece.used) {
-            // Ensure non-hovered cursor always snaps to a valid placement cell for the selected piece
-            if (hoverRow < 0 && !canPlacePiece(p.board, piece, previewR, previewC)) {
-              const bestSnap = findBestValidPlacement(p.board, piece);
-              if (bestSnap) {
-                cursorRow = bestSnap.row;
-                cursorCol = bestSnap.col;
-                previewR = bestSnap.row;
-                previewC = bestSnap.col;
-              }
-            }
-
-            if (previewR >= 0 && previewC >= 0) {
-              const valid = canPlacePiece(p.board, piece, previewR, previewC);
-              const projected = valid
-                ? getProjectedClearLines(p.board, piece, previewR, previewC)
-                : { rows: [], cols: [] };
-              const totalProjectedLines = projected.rows.length + projected.cols.length;
-              const ghostPulse = 0.5 + 0.5 * Math.sin(simTime * 7);
-
-              // 5A. Highlight Projected Line Clears (Full Row/Col Beams + Per-Cell Clear Frames)
-              if (valid && totalProjectedLines > 0) {
-                const beamAlpha = 0.24 + 0.18 * ghostPulse;
-
-                for (const pr of projected.rows) {
-                  const ry = layout.boardTop + pr * layout.cellSize;
-                  const rowGrad = ctx.createLinearGradient(
-                    layout.boardLeft,
-                    ry,
-                    layout.boardLeft + layout.boardPx,
-                    ry
-                  );
-                  rowGrad.addColorStop(0, `rgba(253, 230, 138, ${(beamAlpha * 0.65).toFixed(2)})`);
-                  rowGrad.addColorStop(0.5, `rgba(254, 240, 138, ${(beamAlpha * 1.25).toFixed(2)})`);
-                  rowGrad.addColorStop(1, `rgba(253, 230, 138, ${(beamAlpha * 0.65).toFixed(2)})`);
-
-                  ctx.fillStyle = rowGrad;
-                  ctx.fillRect(layout.boardLeft + 1, ry + 1, layout.boardPx - 2, layout.cellSize - 2);
-
-                  ctx.strokeStyle = '#FEF08A';
-                  ctx.lineWidth = 2.2;
-                  ctx.strokeRect(
-                    layout.boardLeft + 1.5,
-                    ry + 1.5,
-                    layout.boardPx - 3,
-                    layout.cellSize - 3
-                  );
-
-                  // Highlight each existing cell in the clearing row
-                  for (let c = 0; c < BOARD_SIZE; c++) {
-                    const cellX = layout.boardLeft + c * layout.cellSize;
-                    ctx.fillStyle = `rgba(254, 249, 195, ${(0.18 + 0.14 * ghostPulse).toFixed(2)})`;
-                    ctx.beginPath();
-                    ctx.roundRect(cellX + 3, ry + 3, layout.cellSize - 6, layout.cellSize - 6, 4);
-                    ctx.fill();
-                  }
-                }
-
-                for (const pc of projected.cols) {
-                  const rx = layout.boardLeft + pc * layout.cellSize;
-                  const colGrad = ctx.createLinearGradient(
-                    rx,
-                    layout.boardTop,
-                    rx,
-                    layout.boardTop + layout.boardPx
-                  );
-                  colGrad.addColorStop(0, `rgba(110, 231, 183, ${(beamAlpha * 0.65).toFixed(2)})`);
-                  colGrad.addColorStop(0.5, `rgba(167, 243, 208, ${(beamAlpha * 1.25).toFixed(2)})`);
-                  colGrad.addColorStop(1, `rgba(110, 231, 183, ${(beamAlpha * 0.65).toFixed(2)})`);
-
-                  ctx.fillStyle = colGrad;
-                  ctx.fillRect(rx + 1, layout.boardTop + 1, layout.cellSize - 2, layout.boardPx - 2);
-
-                  ctx.strokeStyle = '#6EE7B7';
-                  ctx.lineWidth = 2.2;
-                  ctx.strokeRect(
-                    rx + 1.5,
-                    layout.boardTop + 1.5,
-                    layout.cellSize - 3,
-                    layout.boardPx - 3
-                  );
-
-                  // Highlight each existing cell in the clearing column
-                  for (let r = 0; r < BOARD_SIZE; r++) {
-                    const cellY = layout.boardTop + r * layout.cellSize;
-                    ctx.fillStyle = `rgba(209, 250, 229, ${(0.18 + 0.14 * ghostPulse).toFixed(2)})`;
-                    ctx.beginPath();
-                    ctx.roundRect(rx + 3, cellY + 3, layout.cellSize - 6, layout.cellSize - 6, 4);
-                    ctx.fill();
-                  }
-                }
-              }
-
-              // 5B. Render Snapped High-Transparency 'Ghost' Piece Cells
-              const s = layout.cellSize;
-              const bracketLen = Math.max(5, Math.floor(s * 0.22));
-
-              for (let dr = 0; dr < piece.matrix.length; dr++) {
-                for (let dc = 0; dc < piece.matrix[0].length; dc++) {
-                  if (piece.matrix[dr][dc] === 1) {
-                    const r = previewR + dr;
-                    const c = previewC + dc;
-                    if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
-                      const cx = layout.boardLeft + c * s;
-                      const cy = layout.boardTop + r * s;
-                      const mod = piece.modifiers.find((m) => m.dr === dr && m.dc === dc);
-
-                      if (valid) {
-                        // High-transparency spectral block projection (0.36 alpha)
-                        drawRelicBlock(
-                          cx,
-                          cy,
-                          s,
-                          piece.color,
-                          mod ? mod.kind : 'normal',
-                          mod?.frozenLayers ?? 2,
-                          mod?.bombTimer ?? 5,
-                          p.themeId,
-                          0.36 + 0.08 * ghostPulse,
-                          0.94
-                        );
-
-                        // Luminous Ghost Landing Wash
-                        ctx.save();
-                        ctx.fillStyle =
-                          totalProjectedLines > 0
-                            ? 'rgba(254, 240, 138, 0.18)'
-                            : 'rgba(110, 231, 183, 0.12)';
-                        ctx.beginPath();
-                        ctx.roundRect(cx + 2.5, cy + 2.5, s - 5, s - 5, 5);
-                        ctx.fill();
-
-                        // Dashed Ghost Inner Silhouette
-                        ctx.strokeStyle =
-                          totalProjectedLines > 0
-                            ? 'rgba(254, 240, 138, 0.72)'
-                            : 'rgba(167, 243, 208, 0.62)';
-                        ctx.lineWidth = 1.25;
-                        ctx.setLineDash([4, 3]);
-                        ctx.strokeRect(cx + 3.5, cy + 3.5, s - 7, s - 7);
-                        ctx.setLineDash([]);
-
-                        // 4 Tactile Corner Snap Brackets
-                        ctx.strokeStyle = totalProjectedLines > 0 ? '#FEF08A' : '#6EE7B7';
-                        ctx.lineWidth = 2;
-                        ctx.beginPath();
-                        // Top-left bracket
-                        ctx.moveTo(cx + 2, cy + 2 + bracketLen);
-                        ctx.lineTo(cx + 2, cy + 2);
-                        ctx.lineTo(cx + 2 + bracketLen, cy + 2);
-                        // Top-right bracket
-                        ctx.moveTo(cx + s - 2 - bracketLen, cy + 2);
-                        ctx.lineTo(cx + s - 2, cy + 2);
-                        ctx.lineTo(cx + s - 2, cy + 2 + bracketLen);
-                        // Bottom-right bracket
-                        ctx.moveTo(cx + s - 2, cy + s - 2 - bracketLen);
-                        ctx.lineTo(cx + s - 2, cy + s - 2);
-                        ctx.lineTo(cx + s - 2 - bracketLen, cy + s - 2);
-                        // Bottom-left bracket
-                        ctx.moveTo(cx + 2 + bracketLen, cy + s - 2);
-                        ctx.lineTo(cx + 2, cy + s - 2);
-                        ctx.lineTo(cx + 2, cy + s - 2 - bracketLen);
-                        ctx.stroke();
-
-                        // Center Snap Reticle Dot
-                        ctx.fillStyle = totalProjectedLines > 0 ? '#FEF08A' : '#A7F3D0';
-                        ctx.beginPath();
-                        ctx.arc(cx + s / 2, cy + s / 2, 2.2, 0, Math.PI * 2);
-                        ctx.fill();
-                        ctx.restore();
-                      } else {
-                        // Obstructed Ghost Footprint (High-Transparency + Crimson Invalid Indicator)
-                        drawRelicBlock(
-                          cx,
-                          cy,
-                          s,
-                          piece.color,
-                          mod ? mod.kind : 'normal',
-                          mod?.frozenLayers ?? 2,
-                          mod?.bombTimer ?? 5,
-                          p.themeId,
-                          0.2,
-                          0.92
-                        );
-                        ctx.save();
-                        ctx.fillStyle = 'rgba(239, 68, 68, 0.24)';
-                        ctx.beginPath();
-                        ctx.roundRect(cx + 2.5, cy + 2.5, s - 5, s - 5, 5);
-                        ctx.fill();
-
-                        ctx.strokeStyle = 'rgba(248, 113, 113, 0.85)';
-                        ctx.lineWidth = 1.6;
-                        ctx.setLineDash([4, 3]);
-                        ctx.strokeRect(cx + 3, cy + 3, s - 6, s - 6);
-                        ctx.setLineDash([]);
-                        ctx.restore();
-                      }
-                    }
-                  }
-                }
-              }
-
-              // 5C. Floating Line-Clear Projection Tag Above Ghost Piece
-              if (valid && totalProjectedLines > 0) {
-                const ghostCenterX =
-                  layout.boardLeft + (previewC + piece.matrix[0].length * 0.5) * s;
-                const ghostTopY = Math.max(
-                  layout.boardTop + 14,
-                  layout.boardTop + previewR * s - 10
-                );
-                const label =
-                  totalProjectedLines >= 2
-                    ? `CLEAR x${totalProjectedLines}!`
-                    : 'LINE CLEAR!';
-
-                ctx.save();
-                ctx.font = '800 10.5px "JetBrains Mono", monospace';
-                const textW = ctx.measureText(label).width;
-                const pillW = textW + 14;
-                const pillH = 18;
-                ctx.fillStyle = 'rgba(6, 20, 15, 0.92)';
-                ctx.strokeStyle = '#FEF08A';
-                ctx.lineWidth = 1.5;
-                ctx.beginPath();
-                ctx.roundRect(ghostCenterX - pillW / 2, ghostTopY - pillH / 2, pillW, pillH, 9);
-                ctx.fill();
-                ctx.stroke();
-
-                ctx.fillStyle = '#FEF08A';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(label, ghostCenterX, ghostTopY + 0.5);
-                ctx.restore();
-              }
+          const rem = 1 - (pProg - 0.56) / 0.44;
+          fillRows = Math.ceil(Math.max(0, rem) * BOARD_SIZE);
+          for (let r = BOARD_SIZE - 1; r >= BOARD_SIZE - fillRows; r--) {
+            for (let c = 0; c < BOARD_SIZE; c++) {
+              drawRelicBlock(
+                layout.boardLeft + c * layout.cellSize,
+                layout.boardTop + r * layout.cellSize,
+                layout.cellSize,
+                curtainAnim.colors[r][c],
+                'normal',
+                0,
+                0,
+                p.themeId,
+                1,
+                1
+              );
             }
           }
         }
@@ -1630,8 +1803,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         const trayWidth = layout.boardPx;
 
         // Recessed Tray Dock Surface
-        ctx.fillStyle = 'rgba(6, 16, 12, 0.94)';
-        ctx.strokeStyle = 'rgba(217, 155, 38, 0.45)';
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
+        ctx.strokeStyle = 'rgba(255, 217, 90, 0.38)';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.roundRect(trayLeft - 8, layout.trayTop, trayWidth + 16, layout.trayHeight, 14);
@@ -1648,7 +1821,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           const isSelected = i === p.selectedPieceIndex && piece && !piece.used;
           const isBeingDragged = isSelected && isDragging;
 
-          // Slot divider & highlight
           if (isSelected) {
             ctx.fillStyle = 'rgba(245, 158, 11, 0.16)';
             ctx.strokeStyle = '#FBBF24';
@@ -1665,8 +1837,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
             ctx.stroke();
           }
 
-          // Slot Key Indicator [1], [2], [3]
-          ctx.fillStyle = isSelected ? '#FBBF24' : 'rgba(167, 243, 208, 0.5)';
+          ctx.fillStyle = isSelected ? '#FBBF24' : 'rgba(226, 232, 240, 0.55)';
           ctx.font = '700 10.5px "JetBrains Mono", monospace';
           ctx.textAlign = 'left';
           ctx.textBaseline = 'top';
@@ -1681,12 +1852,10 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
             continue;
           }
 
-          // If this piece is actively being dragged, we draw it lifted under the pointer after the tray loop
           if (isBeingDragged) {
             continue;
           }
 
-          // Selected piece lifts & scales 1.1x with dynamic drop shadow!
           const scaleMult = isSelected ? 1.1 : 1.0;
           const miniCell = Math.round(baseMiniCell * scaleMult);
           const liftY = isSelected ? -4 : 3;
@@ -1721,7 +1890,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
                   mod?.bombTimer ?? 5,
                   p.themeId,
                   fitsAnywhere ? 1 : 0.38,
-                  1
+                  1,
+                  Boolean(mod?.hasGem)
                 );
               }
             }
@@ -1729,7 +1899,6 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
           ctx.restore();
         }
 
-        // Render Lifted Dragged Piece (1.15x scale + deep drop-shadow) following pointer
         const draggedPiece = p.tray[p.selectedPieceIndex];
         if (isDragging && draggedPiece && !draggedPiece.used) {
           const dragCell = Math.round(layout.cellSize * 0.86);
@@ -1759,7 +1928,8 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
                   mod?.bombTimer ?? 5,
                   p.themeId,
                   0.94,
-                  1
+                  1,
+                  Boolean(mod?.hasGem)
                 );
               }
             }
@@ -1800,7 +1970,7 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         ctx.restore();
       }
 
-      // 9. Update & Render Pooled Floating Combo Banners (Scale-Pop Entrance)
+      // 9. Update & Render Pooled Floating Combo Banners & Mini Tile Popups
       for (let i = 0; i < MAX_FLOATING_TEXTS; i++) {
         const ft = floatingTexts[i];
         if (!ft.active) continue;
@@ -1821,11 +1991,13 @@ export const RelicBoardCanvas: React.FC<RelicBoardCanvasProps> = (props) => {
         ctx.globalAlpha = Math.max(0, alpha);
         ctx.translate(ft.x, ft.y);
         ctx.scale(popScale, popScale);
-        ctx.font = '800 20px "Cinzel", Georgia, serif';
+        ctx.font = ft.isMini
+          ? '900 16px "Plus Jakarta Sans", sans-serif'
+          : '800 22px "Cinzel", Georgia, serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.strokeStyle = '#030A07';
-        ctx.lineWidth = 4.5;
+        ctx.strokeStyle = 'rgba(15, 23, 42, 0.85)';
+        ctx.lineWidth = ft.isMini ? 3.5 : 4.5;
         ctx.strokeText(ft.text, 0, 0);
         ctx.fillStyle = ft.color;
         ctx.fillText(ft.text, 0, 0);

@@ -6,9 +6,24 @@ export type GridArchitecture = 'standard' | 'holed' | 'shifting' | 'l_shaped';
 
 export type GameMode = 'classic' | 'daily' | 'blitz' | 'campaign';
 
-export type BoosterType = 'rotate' | 'hammer' | 'reroll' | 'bomb_blast';
+export type BoosterType =
+  | 'rotate'
+  | 'hammer'
+  | 'reroll'
+  | 'bomb_blast'
+  | 'laser'
+  | 'single_star';
 
-export type ThemeSkinId = 'mystic_forest' | 'artisan_wood' | 'crystal_prism' | 'autumn_leaf' | 'retro_pixel';
+export type ThemeSkinId =
+  | 'pastel_blast'
+  | 'classic_video'
+  | 'sugar_cream'
+  | 'night_neon'
+  | 'mystic_forest'
+  | 'artisan_wood'
+  | 'crystal_prism'
+  | 'autumn_leaf'
+  | 'retro_pixel';
 
 export interface GridCell {
   row: number;
@@ -17,6 +32,7 @@ export interface GridCell {
   color: BlockColor;
   frozenLayers: number; // 0 for normal, 2 or 3 for frozen blocks
   bombTimer: number; // 0 for normal, 1..5 for bomb blocks
+  hasGem?: boolean; // Collectible Adventure Star / Gem embedded in tile
   highlightFlash?: number; // transient visual flash timestamp/intensity
 }
 
@@ -26,6 +42,7 @@ export interface PieceCellModifier {
   kind: 'normal' | 'frozen' | 'bomb' | 'wildcard';
   frozenLayers?: number;
   bombTimer?: number;
+  hasGem?: boolean;
 }
 
 export interface TrayPiece {
@@ -38,7 +55,13 @@ export interface TrayPiece {
 }
 
 export interface StageObjective {
-  type: 'score' | 'clear_ruby' | 'shatter_ice' | 'defuse_bomb' | 'clear_lines';
+  type:
+    | 'score'
+    | 'clear_ruby'
+    | 'shatter_ice'
+    | 'defuse_bomb'
+    | 'clear_lines'
+    | 'collect_gems';
   label: string;
   target: number;
   current: number;
@@ -53,6 +76,7 @@ export interface CampaignStageConfig {
   objectives: StageObjective[];
   initialFrozenCount: number;
   initialBombCount: number;
+  initialGemCount?: number;
   rewardCoins: number;
   rewardStars: number;
 }
@@ -86,9 +110,10 @@ export interface PlacementResult {
   bombsDefused: number;
   bombsDetonated: number;
   wildcardsTriggered: number;
+  gemsCollected: number;
   fullRows: number[];
   fullCols: number[];
-  clearedCells: Array<{ row: number; col: number; color: BlockColor }>;
+  clearedCells: Array<{ row: number; col: number; color: BlockColor; hasGem?: boolean }>;
   events: PlacementEvent[];
 }
 
@@ -102,7 +127,9 @@ export const BASE_BOOSTER_COSTS: Record<BoosterType, number> = {
   rotate: 30,
   reroll: 40,
   hammer: 50,
-  bomb_blast: 75,
+  single_star: 50,
+  bomb_blast: 60,
+  laser: 75,
 };
 
 export interface ShapeTemplate {
@@ -224,6 +251,7 @@ export function createBoard(
   options?: {
     initialFrozenCount?: number;
     initialBombCount?: number;
+    initialGemCount?: number;
     seed?: number;
   }
 ): GridCell[][] {
@@ -289,6 +317,31 @@ export function createBoard(
         bombTimer: 5,
       };
       placedBombs++;
+    }
+  }
+
+  // Place deterministic initial collectible Gem Star blocks
+  const gemCount = options?.initialGemCount ?? 0;
+  let placedGems = 0;
+  attempts = 0;
+  while (placedGems < gemCount && attempts < 200) {
+    attempts++;
+    const r = Math.floor(nextRand() * BOARD_SIZE);
+    const c = Math.floor(nextRand() * BOARD_SIZE);
+    if (board[r][c].kind === 'empty') {
+      board[r][c] = {
+        row: r,
+        col: c,
+        kind: 'normal',
+        color: BLOCK_COLORS[(r * 3 + c) % BLOCK_COLORS.length],
+        frozenLayers: 0,
+        bombTimer: 0,
+        hasGem: true,
+      };
+      placedGems++;
+    } else if (board[r][c].kind === 'frozen' && !board[r][c].hasGem) {
+      board[r][c].hasGem = true;
+      placedGems++;
     }
   }
 
@@ -522,6 +575,7 @@ export function placePieceOnBoard(
       bombsDefused: 0,
       bombsDetonated: 0,
       wildcardsTriggered: 0,
+      gemsCollected: 0,
       fullRows: [],
       fullCols: [],
       clearedCells: [],
@@ -539,7 +593,8 @@ export function placePieceOnBoard(
   let bombsDefused = 0;
   let bombsDetonated = 0;
   let wildcardsTriggered = 0;
-  const clearedCells: Array<{ row: number; col: number; color: BlockColor }> = [];
+  let gemsCollected = 0;
+  const clearedCells: Array<{ row: number; col: number; color: BlockColor; hasGem?: boolean }> = [];
 
   // 1. Place piece cells onto nextBoard
   for (let dr = 0; dr < piece.matrix.length; dr++) {
@@ -556,6 +611,7 @@ export function placePieceOnBoard(
           color: piece.color,
           frozenLayers: kind === 'frozen' ? (mod?.frozenLayers ?? 2) : 0,
           bombTimer: kind === 'bomb' ? (mod?.bombTimer ?? 5) : 0,
+          hasGem: Boolean(mod?.hasGem),
         };
         newlyPlacedCoords.add(`${r},${c}`);
         blocksPlacedCount++;
@@ -683,7 +739,10 @@ export function placePieceOnBoard(
       if (cell.color === 'ruby') {
         rubyCleared++;
       }
-      clearedCells.push({ row: r, col: c, color: cell.color });
+      if (cell.hasGem) {
+        gemsCollected++;
+      }
+      clearedCells.push({ row: r, col: c, color: cell.color, hasGem: cell.hasGem });
       nextBoard[r][c] = {
         row: r,
         col: c,
@@ -691,6 +750,7 @@ export function placePieceOnBoard(
         color: 'emerald',
         frozenLayers: 0,
         bombTimer: 0,
+        hasGem: false,
       };
     }
   }
@@ -800,6 +860,7 @@ export function placePieceOnBoard(
     bombsDefused,
     bombsDetonated,
     wildcardsTriggered,
+    gemsCollected,
     fullRows,
     fullCols,
     clearedCells,
@@ -865,18 +926,21 @@ export function applyBombBlastBooster(
   success: boolean;
   board: GridCell[][];
   clearedCount: number;
-  clearedCells: Array<{ row: number; col: number; color: BlockColor }>;
+  gemsCollected: number;
+  clearedCells: Array<{ row: number; col: number; color: BlockColor; hasGem?: boolean }>;
 } {
   if (centerRow < 0 || centerRow >= BOARD_SIZE || centerCol < 0 || centerCol >= BOARD_SIZE) {
-    return { success: false, board, clearedCount: 0, clearedCells: [] };
+    return { success: false, board, clearedCount: 0, gemsCollected: 0, clearedCells: [] };
   }
   const next = cloneBoard(board);
-  const clearedCells: Array<{ row: number; col: number; color: BlockColor }> = [];
+  let gemsCollected = 0;
+  const clearedCells: Array<{ row: number; col: number; color: BlockColor; hasGem?: boolean }> = [];
   for (let r = Math.max(0, centerRow - 1); r <= Math.min(BOARD_SIZE - 1, centerRow + 1); r++) {
     for (let c = Math.max(0, centerCol - 1); c <= Math.min(BOARD_SIZE - 1, centerCol + 1); c++) {
       const cell = next[r][c];
       if (cell.kind !== 'empty' && cell.kind !== 'void') {
-        clearedCells.push({ row: r, col: c, color: cell.color });
+        if (cell.hasGem) gemsCollected++;
+        clearedCells.push({ row: r, col: c, color: cell.color, hasGem: cell.hasGem });
         next[r][c] = {
           row: r,
           col: c,
@@ -884,6 +948,7 @@ export function applyBombBlastBooster(
           color: 'emerald',
           frozenLayers: 0,
           bombTimer: 0,
+          hasGem: false,
         };
       }
     }
@@ -892,7 +957,87 @@ export function applyBombBlastBooster(
     success: clearedCells.length > 0,
     board: next,
     clearedCount: clearedCells.length,
+    gemsCollected,
     clearedCells,
+  };
+}
+
+/**
+ * Applies the Row & Column Cross Laser Joker centered at (targetRow, targetCol).
+ * Clears all occupied cells along both targetRow and targetCol.
+ */
+export function applyLaserBooster(
+  board: GridCell[][],
+  targetRow: number,
+  targetCol: number
+): {
+  success: boolean;
+  board: GridCell[][];
+  clearedCount: number;
+  gemsCollected: number;
+  clearedCells: Array<{ row: number; col: number; color: BlockColor; hasGem?: boolean }>;
+} {
+  if (targetRow < 0 || targetRow >= BOARD_SIZE || targetCol < 0 || targetCol >= BOARD_SIZE) {
+    return { success: false, board, clearedCount: 0, gemsCollected: 0, clearedCells: [] };
+  }
+  const next = cloneBoard(board);
+  const clearedCells: Array<{ row: number; col: number; color: BlockColor; hasGem?: boolean }> = [];
+  let gemsCollected = 0;
+
+  for (let i = 0; i < BOARD_SIZE; i++) {
+    // Row sweep
+    const rowCell = next[targetRow][i];
+    if (rowCell.kind !== 'empty' && rowCell.kind !== 'void') {
+      if (rowCell.hasGem) gemsCollected++;
+      clearedCells.push({ row: targetRow, col: i, color: rowCell.color, hasGem: rowCell.hasGem });
+      next[targetRow][i] = {
+        row: targetRow,
+        col: i,
+        kind: 'empty',
+        color: 'emerald',
+        frozenLayers: 0,
+        bombTimer: 0,
+        hasGem: false,
+      };
+    }
+    // Column sweep
+    if (i !== targetRow) {
+      const colCell = next[i][targetCol];
+      if (colCell.kind !== 'empty' && colCell.kind !== 'void') {
+        if (colCell.hasGem) gemsCollected++;
+        clearedCells.push({ row: i, col: targetCol, color: colCell.color, hasGem: colCell.hasGem });
+        next[i][targetCol] = {
+          row: i,
+          col: targetCol,
+          kind: 'empty',
+          color: 'emerald',
+          frozenLayers: 0,
+          bombTimer: 0,
+          hasGem: false,
+        };
+      }
+    }
+  }
+
+  return {
+    success: clearedCells.length > 0,
+    board: next,
+    clearedCount: clearedCells.length,
+    gemsCollected,
+    clearedCells,
+  };
+}
+
+/**
+ * Converts a TrayPiece into a 1x1 Pastel Star Block that fits any empty cell.
+ */
+export function convertPieceToSingleStar(piece: TrayPiece): TrayPiece {
+  return {
+    ...piece,
+    name: '1×1 Pastel Yıldız',
+    matrix: [[1]],
+    modifiers: [{ dr: 0, dc: 0, kind: 'wildcard', hasGem: true }],
+    used: false,
   };
 }
 
@@ -936,11 +1081,13 @@ export function generateTrayPieces(
     if (coords.length > 0) {
       const pick = coords[Math.floor(nextRand() * coords.length)];
       if (i === 2 && roll < 0.28) {
-        modifiers.push({ dr: pick.dr, dc: pick.dc, kind: 'wildcard' });
+        modifiers.push({ dr: pick.dr, dc: pick.dc, kind: 'wildcard', hasGem: roll < 0.14 });
       } else if (i === 1 && turnIndex >= 1 && roll < 0.22) {
         modifiers.push({ dr: pick.dr, dc: pick.dc, kind: 'frozen', frozenLayers: 2 });
       } else if (mode !== 'daily' && i === 1 && turnIndex >= 2 && roll > 0.86) {
         modifiers.push({ dr: pick.dr, dc: pick.dc, kind: 'bomb', bombTimer: 5 });
+      } else if (roll > 0.45 && roll < 0.72) {
+        modifiers.push({ dr: pick.dr, dc: pick.dc, kind: 'normal', hasGem: true });
       }
     }
 
@@ -970,28 +1117,45 @@ const BIOME_NAMES = [
   'Aether Citadel',
 ];
 
+const PASTEL_STAGE_TITLES: Record<number, string> = {
+  1: 'Pastel Bahçe',
+  2: 'Buzul Şekeri',
+  3: 'Lavanta Mozaik',
+  4: 'Şeker Kristali',
+  5: 'Gökkuşağı Zirvesi',
+};
+
 /**
- * Deterministically builds any of the 500 Campaign Stages!
+ * Deterministically builds any of the 500 Campaign Stages (including Pastel Blast Adventure stages 1-5)!
  */
 export function getCampaignStageConfig(stageNumber: number): CampaignStageConfig {
   const clamped = Math.max(1, Math.min(500, Math.floor(stageNumber)));
   const biomeIndex = Math.min(BIOME_NAMES.length - 1, Math.floor((clamped - 1) / 50));
-  const biome = BIOME_NAMES[biomeIndex];
+  const biome = PASTEL_STAGE_TITLES[clamped] || BIOME_NAMES[biomeIndex];
 
   let architecture: GridArchitecture = 'standard';
-  if (clamped % 4 === 2) architecture = 'holed';
-  else if (clamped % 4 === 3) architecture = 'shifting';
-  else if (clamped % 4 === 0) architecture = 'l_shaped';
+  if (clamped > 5) {
+    if (clamped % 4 === 2) architecture = 'holed';
+    else if (clamped % 4 === 3) architecture = 'shifting';
+    else if (clamped % 4 === 0) architecture = 'l_shaped';
+  }
 
-  const moveLimit = Math.max(12, 20 - Math.floor(clamped / 120));
+  const moveLimit = Math.max(14, 22 - Math.floor(clamped / 120));
   const initialFrozenCount = clamped >= 2 ? Math.min(8, 2 + Math.floor(clamped / 35)) : 2;
   const initialBombCount = clamped >= 3 ? Math.min(3, 1 + Math.floor(clamped / 90)) : 0;
+  const initialGemCount = clamped % 2 === 1 ? 6 : 4;
 
   const objectives: StageObjective[] = [
     {
       type: 'score',
       label: 'Relic Score',
       target: 450 + clamped * 85,
+      current: 0,
+    },
+    {
+      type: 'collect_gems',
+      label: 'Collect Gem Stars',
+      target: Math.min(8, 3 + Math.floor(clamped / 30)),
       current: 0,
     },
     {
@@ -1020,6 +1184,7 @@ export function getCampaignStageConfig(stageNumber: number): CampaignStageConfig
     objectives,
     initialFrozenCount,
     initialBombCount,
+    initialGemCount,
     rewardCoins: 60 + clamped * 5,
     rewardStars: 3,
   };

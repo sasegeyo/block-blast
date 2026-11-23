@@ -10,6 +10,8 @@ import {
   TrayPiece,
   applyBombBlastBooster,
   applyHammerBooster,
+  applyLaserBooster,
+  convertPieceToSingleStar,
   createBoard,
   getBoosterCoinCost,
   getCampaignStageConfig,
@@ -80,7 +82,12 @@ export default function App() {
 
   // Board & Tray state
   const [board, setBoard] = useState<GridCell[][]>(() =>
-    createBoard('standard', { initialFrozenCount: 3, initialBombCount: 1, seed: 2026 })
+    createBoard('standard', {
+      initialFrozenCount: 3,
+      initialBombCount: 1,
+      initialGemCount: 3,
+      seed: 2026,
+    })
   );
   const [turnIndex, setTurnIndex] = useState<number>(1);
   const [tray, setTray] = useState<TrayPiece[]>(() => generateTrayPieces(2026, 'classic', 1));
@@ -96,25 +103,30 @@ export default function App() {
   const [objectives, setObjectives] = useState<StageObjective[]>([]);
   const [lastChanceUsed, setLastChanceUsed] = useState<boolean>(false);
   const [statusBannerText, setStatusBannerText] = useState<string>(
-    'Drag or tap a piece [1-3] onto the carved sockets to clear lines!'
+    'Blokları [1-3] sürükle veya tıkla · Satır/Sütun patlat ve kombo yap!'
   );
   const [burstSignal, setBurstSignal] = useState<CanvasParticleBurst | null>(null);
+  const [curtainSignal, setCurtainSignal] = useState<number>(0);
 
-  // Boosters & Anti-Pay-to-Win Session Safeguards
+  // 6 Tactical Boosters & Jokers + Anti-Pay-to-Win Session Safeguards
   const [boosterStock, setBoosterStock] = useState<Record<BoosterType, number>>({
     rotate: 2,
     hammer: 2,
     reroll: 2,
     bomb_blast: 1,
+    laser: 1,
+    single_star: 1,
   });
   const [boosterUsesSession, setBoosterUsesSession] = useState<Record<BoosterType, number>>({
     rotate: 0,
     hammer: 0,
     reroll: 0,
     bomb_blast: 0,
+    laser: 0,
+    single_star: 0,
   });
   const [activeTargetingBooster, setActiveTargetingBooster] = useState<
-    'hammer' | 'bomb_blast' | null
+    'hammer' | 'bomb_blast' | 'laser' | null
   >(null);
 
   // Economy & Meta Progression
@@ -128,10 +140,12 @@ export default function App() {
   const [currentCampaignStage, setCurrentCampaignStage] = useState<number>(1);
   const [weeklyLeagueBaseScore, setWeeklyLeagueBaseScore] = useState<number>(3850);
   const [unlockedSkins, setUnlockedSkins] = useState<ThemeSkinId[]>([
+    'pastel_blast',
+    'classic_video',
     'mystic_forest',
     'artisan_wood',
   ]);
-  const [equippedSkin, setEquippedSkin] = useState<ThemeSkinId>('mystic_forest');
+  const [equippedSkin, setEquippedSkin] = useState<ThemeSkinId>('pastel_blast');
   const [claimedShopBundles, setClaimedShopBundles] = useState<string[]>([]);
   const [activeModal, setActiveModal] = useState<ActiveMetaModal>(null);
   const [isGodotModalOpen, setIsGodotModalOpen] = useState<boolean>(() => {
@@ -141,6 +155,7 @@ export default function App() {
     return false;
   });
   const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [bgmEnabled, setBgmEnabled] = useState<boolean>(false);
   const [frozenSummary, setFrozenSummary] = useState<FrozenRunSummary | null>(null);
 
   const burstIdCounterRef = useRef<number>(1);
@@ -160,11 +175,24 @@ export default function App() {
 
   const { currentStreak } = useMemo(() => computeCalendarStreak(calendar), [calendar]);
 
+  // Milestone Progress Percentage (Block Blast Top Pill)
+  const milestonePct = useMemo(() => {
+    if ((gameMode === 'daily' || gameMode === 'campaign') && objectives.length > 0) {
+      const totalRatio = objectives.reduce(
+        (acc, o) => acc + Math.min(1, o.current / Math.max(1, o.target)),
+        0
+      );
+      return Math.min(100, Math.round((totalRatio / objectives.length) * 100));
+    }
+    return Math.min(100, Math.round(((score % 1000) / 1000) * 100));
+  }, [gameMode, objectives, score]);
+
   const startNewRun = useCallback(
     (
       targetMode: GameMode = gameMode,
       targetArch: GridArchitecture = architecture,
-      stageNum: number = currentCampaignStage
+      stageNum: number = currentCampaignStage,
+      withCurtain: boolean = true
     ) => {
       if (document.activeElement instanceof HTMLElement) {
         document.activeElement.blur();
@@ -182,11 +210,14 @@ export default function App() {
         hammer: 0,
         reroll: 0,
         bomb_blast: 0,
+        laser: 0,
+        single_star: 0,
       });
 
       let chosenArch = targetArch;
       let frozenInit = 3;
       let bombInit = 1;
+      let gemInit = 2;
       let moveLim = 16;
       let nextObjectives: StageObjective[] = [];
 
@@ -194,28 +225,31 @@ export default function App() {
         chosenArch = 'holed';
         frozenInit = 3;
         bombInit = 1;
+        gemInit = 3;
         moveLim = 14;
         nextObjectives = [
           { type: 'clear_ruby', label: 'Clear Ruby Blocks', target: 12, current: 0 },
           { type: 'shatter_ice', label: 'Shatter Ice Blocks', target: 2, current: 0 },
         ];
-        setStatusBannerText('Daily Puzzle (Nov 8): Clear 12 Ruby & 2 Ice Blocks within 14 Moves!');
+        setStatusBannerText('Günlük Bulmaca (8 Kasım): 14 hamlede 12 Yakut & 2 Buz Bloğu kır!');
       } else if (targetMode === 'campaign') {
         const cfg = getCampaignStageConfig(stageNum);
         chosenArch = cfg.architecture;
         frozenInit = cfg.initialFrozenCount;
         bombInit = cfg.initialBombCount;
+        gemInit = cfg.initialGemCount ?? 4;
         moveLim = cfg.moveLimit;
         nextObjectives = cfg.objectives.map((o) => ({ ...o, current: 0 }));
-        setStatusBannerText(`${cfg.title} · ${cfg.architecture.toUpperCase()} Grid · ${moveLim} Moves`);
+        setStatusBannerText(`${cfg.title} · ${cfg.architecture.toUpperCase()} Tahta · ${moveLim} Hamle`);
       } else if (targetMode === 'blitz') {
         frozenInit = 2;
         bombInit = 2;
+        gemInit = 3;
         setBlitzSecondsLeft(90);
-        setStatusBannerText('Time Attack Blitz: Clear lines & combos for +4s/+8s bonus time!');
+        setStatusBannerText('Time Attack Blitz: Her kombo ve satır patlatma +4sn/+8sn süre verir!');
       } else {
         setStatusBannerText(
-          `Classic Endless (${chosenArch.replace('_', ' ')}) · Drag or tap pieces to clear lines!`
+          `Klasik Sonsuz (${chosenArch.replace('_', ' ')}) · Blokları yerleştir ve rekor kır!`
         );
       }
 
@@ -227,6 +261,7 @@ export default function App() {
       const newBoard = createBoard(chosenArch, {
         initialFrozenCount: frozenInit,
         initialBombCount: bombInit,
+        initialGemCount: gemInit,
         seed: 2026 + stageNum * 37,
       });
       const newTray = generateTrayPieces(2026 + stageNum * 91, targetMode, 1);
@@ -234,7 +269,11 @@ export default function App() {
       setTray(newTray);
       setSelectedPieceIndex(0);
       setShellState('playing');
-      soundSynth.playSelect();
+      if (withCurtain) {
+        setCurtainSignal((prev) => prev + 1);
+      } else {
+        soundSynth.playSelect();
+      }
     },
     [architecture, currentCampaignStage, gameMode]
   );
@@ -306,6 +345,10 @@ export default function App() {
         soundSynth.playPlace();
       }
 
+      if (result.gemsCollected > 0) {
+        soundSynth.playCoin();
+      }
+
       const placedCellsList = piece.matrix.flatMap((rArr, dr) =>
         rArr
           .map((val, dc) =>
@@ -317,17 +360,26 @@ export default function App() {
       const burstCells =
         result.clearedCells.length > 0 ? result.clearedCells : placedCellsList;
 
-      // Energetic Floating Combo Banners
+      // Block Blast Praise & Combo Callouts
       let secondaryBanner: string | undefined;
-      if (result.linesCleared >= 3) {
-        secondaryBanner = 'RELIC CASCADE!';
+      if (result.linesCleared >= 4) {
+        secondaryBanner = 'EFSANEVİ!';
+      } else if (result.linesCleared === 3) {
+        secondaryBanner = 'Muhteşem!';
       } else if (result.linesCleared === 2) {
-        secondaryBanner = 'MAGNIFICENT!';
-      } else if (result.comboCount >= 2) {
-        secondaryBanner = `COMBO x${result.comboCount}!`;
+        secondaryBanner = 'Süper!';
+      } else if (result.linesCleared === 1) {
+        secondaryBanner = 'Harika!';
       } else if (result.wildcardsTriggered > 0) {
         secondaryBanner = 'PRISM SURGE!';
       }
+
+      const primaryCallout =
+        result.comboCount >= 2
+          ? `Combo ${result.comboCount}!`
+          : result.gemsCollected > 0
+            ? `⭐ +${result.gemsCollected} Taş!`
+            : result.events[0]?.message;
 
       burstIdCounterRef.current += 1;
       setBurstSignal({
@@ -346,20 +398,20 @@ export default function App() {
             : result.linesCleared === 1 || result.wildcardsTriggered > 0
               ? 'medium'
               : 'light',
-        calloutText: result.events[0]?.message,
+        calloutText: primaryCallout,
         secondaryBannerText: secondaryBanner,
       });
 
       if (result.events.length > 0) {
         setStatusBannerText(result.events.map((e) => e.message).join(' · '));
       } else {
-        setStatusBannerText(`Placed ${piece.name} (+${result.scoreDelta} pts)`);
+        setStatusBannerText(`${piece.name} yerleştirildi (+${result.scoreDelta} puan)`);
       }
 
       const nextScore = score + result.scoreDelta;
       const nextBest = Math.max(bestScore, nextScore);
       const nextLines = linesClearedRun + result.linesCleared;
-      const nextCoins = coins + result.coinsEarned;
+      const nextCoins = coins + result.coinsEarned + result.gemsCollected * 4;
 
       setBoard(result.board);
       setScore(nextScore);
@@ -401,6 +453,9 @@ export default function App() {
           }
           if (obj.type === 'clear_lines') {
             return { ...obj, current: Math.min(obj.target, obj.current + result.linesCleared) };
+          }
+          if (obj.type === 'collect_gems') {
+            return { ...obj, current: Math.min(obj.target, obj.current + result.gemsCollected) };
           }
           return obj;
         });
@@ -494,7 +549,7 @@ export default function App() {
       const usedThisSession = boosterUsesSession[type];
       if (usedThisSession >= MAX_BOOSTER_USES_PER_SESSION) {
         setStatusBannerText(
-          `Anti-Pay-to-Win Cap: ${type.toUpperCase()} used ${MAX_BOOSTER_USES_PER_SESSION}/3 times this session!`
+          `Anti-Pay-to-Win Sınırı: ${type.toUpperCase()} bu oyunda ${MAX_BOOSTER_USES_PER_SESSION}/3 kez kullanıldı!`
         );
         return false;
       }
@@ -514,7 +569,7 @@ export default function App() {
       }
 
       setStatusBannerText(
-        `Need ${coinCost ?? 999} Coins or stock to deploy ${type.toUpperCase()}!`
+        `${type.toUpperCase()} için ${coinCost ?? 999} Coin veya stok gerekli!`
       );
       return false;
     },
@@ -533,7 +588,7 @@ export default function App() {
       setTray((prev) =>
         prev.map((p, idx) => (idx === pieceIdx ? rotateTrayPiece(p) : p))
       );
-      setStatusBannerText(`Rotated ${target.name} 90° clockwise!`);
+      setStatusBannerText(`${target.name} 90° döndürüldü!`);
     },
     [selectedPieceIndex, shellState, tray, tryConsumeBooster]
   );
@@ -549,10 +604,27 @@ export default function App() {
     const fresh = generateTrayPieces(2026 + nextTurn * 313, gameMode, nextTurn);
     setTray(fresh);
     setSelectedPieceIndex(0);
-    setStatusBannerText('Rerolled 3 fresh Relic Shapes!');
+    setStatusBannerText('3 yeni blok şekli yenilendi!');
   }, [gameMode, shellState, tryConsumeBooster, turnIndex]);
 
-  // Activate Targetable Booster Mode (Hammer [H] or Bomb Blast [B])
+  // 1x1 Single Star Joker [G]
+  const handleConvertSingleStar = useCallback(
+    (pieceIdx: number = selectedPieceIndex) => {
+      if (shellState !== 'playing') return;
+      const target = tray[pieceIdx];
+      if (!target || target.used) return;
+      if (!tryConsumeBooster('single_star')) return;
+
+      soundSynth.playBooster();
+      setTray((prev) =>
+        prev.map((p, idx) => (idx === pieceIdx ? convertPieceToSingleStar(p) : p))
+      );
+      setStatusBannerText('✨ Seçili parça 1×1 Yıldız Bloğa dönüştürüldü!');
+    },
+    [selectedPieceIndex, shellState, tray, tryConsumeBooster]
+  );
+
+  // Activate Targetable or Instant Booster Mode
   const handleActivateBoosterMode = useCallback(
     (booster: BoosterType) => {
       if (shellState !== 'playing') return;
@@ -564,22 +636,35 @@ export default function App() {
         handleRerollTray();
         return;
       }
-      if (booster === 'hammer' || booster === 'bomb_blast') {
+      if (booster === 'single_star') {
+        handleConvertSingleStar(selectedPieceIndex);
+        return;
+      }
+      if (booster === 'hammer' || booster === 'bomb_blast' || booster === 'laser') {
         if (boosterUsesSession[booster] >= MAX_BOOSTER_USES_PER_SESSION) {
           setStatusBannerText(
-            `Anti-Pay-to-Win Cap: ${booster.toUpperCase()} maxed at ${MAX_BOOSTER_USES_PER_SESSION}/3 this session!`
+            `Anti-Pay-to-Win Sınırı: ${booster.toUpperCase()} bu oyunda ${MAX_BOOSTER_USES_PER_SESSION}/3 kez kullanıldı!`
           );
           return;
         }
         setActiveTargetingBooster((prev) => (prev === booster ? null : booster));
         setStatusBannerText(
           booster === 'hammer'
-            ? 'Hammer Armed: Tap any occupied block on the grid to shatter it!'
-            : '3x3 Bomb Armed: Tap the grid to detonate a 3x3 sector!'
+            ? '🔨 Çekiç Hazır: Kırmak istediğin bloğa tıkla!'
+            : booster === 'bomb_blast'
+              ? '💥 3×3 Bomba Hazır: Patlatmak istediğin 3×3 alana tıkla!'
+              : '⚡ Lazer Hazır: Tam satır ve sütunu temizlemek için bir hücreye tıkla!'
         );
       }
     },
-    [boosterUsesSession, handleRerollTray, handleRotatePiece, selectedPieceIndex, shellState]
+    [
+      boosterUsesSession,
+      handleConvertSingleStar,
+      handleRerollTray,
+      handleRotatePiece,
+      selectedPieceIndex,
+      shellState,
+    ]
   );
 
   // Execute Targetable Booster on board cell (row, col)
@@ -589,7 +674,7 @@ export default function App() {
       if (activeTargetingBooster === 'hammer') {
         const res = applyHammerBooster(board, row, col);
         if (!res.success || !res.shatteredCell) {
-          setStatusBannerText('Hammer requires an occupied Relic cell!');
+          setStatusBannerText('Çekiç için dolu bir blok seçmelisin!');
           return;
         }
         if (!tryConsumeBooster('hammer')) {
@@ -607,11 +692,11 @@ export default function App() {
           intensity: 'heavy',
           calloutText: 'HAMMER SMASH!',
         });
-        setStatusBannerText('Hammer shattered obstacle at (' + (row + 1) + ', ' + (col + 1) + ')!');
+        setStatusBannerText(`Çekiç (${row + 1}, ${col + 1}) hücresini kırdı!`);
       } else if (activeTargetingBooster === 'bomb_blast') {
         const res = applyBombBlastBooster(board, row, col);
         if (!res.success) {
-          setStatusBannerText('Select a 3x3 sector containing at least 1 block!');
+          setStatusBannerText('En az 1 dolu blok içeren bir 3×3 bölge seç!');
           return;
         }
         if (!tryConsumeBooster('bomb_blast')) {
@@ -619,7 +704,13 @@ export default function App() {
           return;
         }
         soundSynth.playBombDefuse();
+        const bonusPts = res.clearedCount * 10;
         setBoard(res.board);
+        setScore((s) => s + bonusPts);
+        setBestScore((b) => Math.max(b, score + bonusPts));
+        if (res.gemsCollected > 0) {
+          setCoins((c) => c + res.gemsCollected * 5);
+        }
         setActiveTargetingBooster(null);
         burstIdCounterRef.current += 1;
         setBurstSignal({
@@ -627,30 +718,115 @@ export default function App() {
           cells: res.clearedCells,
           ringCenter: { row, col },
           intensity: 'heavy',
-          calloutText: `3x3 BLAST (-${res.clearedCount} BLOCKS)`,
+          calloutText: `💥 3×3 BOMBA! (+${bonusPts})`,
         });
-        setStatusBannerText(`3x3 Bomb Blast cleared ${res.clearedCount} blocks!`);
+        setStatusBannerText(`3×3 Bomba ${res.clearedCount} bloğu temizledi!`);
+      } else if (activeTargetingBooster === 'laser') {
+        const res = applyLaserBooster(board, row, col);
+        if (!res.success) {
+          setStatusBannerText('En az 1 dolu blok içeren bir satır/sütun kesişimi seç!');
+          return;
+        }
+        if (!tryConsumeBooster('laser')) {
+          setActiveTargetingBooster(null);
+          return;
+        }
+        soundSynth.playLaser();
+        const bonusPts = res.clearedCount * 12;
+        setBoard(res.board);
+        setScore((s) => s + bonusPts);
+        setBestScore((b) => Math.max(b, score + bonusPts));
+        if (res.gemsCollected > 0) {
+          setCoins((c) => c + res.gemsCollected * 5);
+        }
+        setActiveTargetingBooster(null);
+        burstIdCounterRef.current += 1;
+        setBurstSignal({
+          id: burstIdCounterRef.current,
+          cells: res.clearedCells,
+          fullRows: [row],
+          fullCols: [col],
+          ringCenter: { row, col },
+          intensity: 'heavy',
+          calloutText: `⚡ LAZER! (+${bonusPts})`,
+        });
+        setStatusBannerText(`Satır & Sütun Lazeri ${res.clearedCount} bloğu temizledi!`);
       }
     },
-    [activeTargetingBooster, board, tryConsumeBooster]
+    [activeTargetingBooster, board, score, tryConsumeBooster]
   );
 
-  // F2P One-Time "Last Chance Continue" on Defeat
-  const handleLastChanceContinue = useCallback(() => {
-    if (lastChanceUsed) return;
-    setLastChanceUsed(true);
-    const res = applyBombBlastBooster(board, 3, 3);
-    const res2 = applyBombBlastBooster(res.board, 4, 4);
-    const nextTurn = turnIndex + 1;
-    setBoard(res2.board);
-    setTray(generateTrayPieces(2026 + nextTurn * 509, gameMode, nextTurn));
-    setMovesRemaining((m) => Math.max(5, m + 5));
-    setBlitzSecondsLeft((s) => Math.max(30, s + 30));
-    setFrozenSummary(null);
-    setShellState('playing');
-    soundSynth.playBooster();
-    setStatusBannerText('Last Chance Activated! Center 3x3 cleared & +5 Moves granted!');
-  }, [board, gameMode, lastChanceUsed, turnIndex]);
+  // Out-of-Moves Joker Rescue (from Game Over Modal)
+  const handleOutOfMovesJokerRescue = useCallback(
+    (rescueType: 'reroll' | 'single_star' | 'center_bomb') => {
+      if (rescueType === 'center_bomb') {
+        if (lastChanceUsed) return;
+        setLastChanceUsed(true);
+        const res = applyBombBlastBooster(board, 3, 3);
+        const res2 = applyBombBlastBooster(res.board, 4, 4);
+        const nextTurn = turnIndex + 1;
+        setBoard(res2.board);
+        setTray(generateTrayPieces(2026 + nextTurn * 509, gameMode, nextTurn));
+        setMovesRemaining((m) => Math.max(5, m + 5));
+        setBlitzSecondsLeft((s) => Math.max(30, s + 30));
+        setFrozenSummary(null);
+        setShellState('playing');
+        soundSynth.playBooster();
+        setStatusBannerText('💥 Merkez 3×3 temizlendi ve +5 Hamle eklendi!');
+        return;
+      }
+
+      if (rescueType === 'reroll') {
+        const stock = boosterStock.reroll;
+        if (stock <= 0 && coins < 25) {
+          setStatusBannerText('Yenile Jokeri için 25 Coin gerekli!');
+          return;
+        }
+        if (stock > 0) {
+          setBoosterStock((prev) => ({ ...prev, reroll: prev.reroll - 1 }));
+        } else {
+          setCoins((c) => c - 25);
+        }
+        const nextTurn = turnIndex + 1;
+        setTurnIndex(nextTurn);
+        setTray(generateTrayPieces(2026 + nextTurn * 419, gameMode, nextTurn));
+        setSelectedPieceIndex(0);
+        setMovesRemaining((m) => Math.max(3, m + 3));
+        setFrozenSummary(null);
+        setShellState('playing');
+        soundSynth.playBooster();
+        setStatusBannerText('↻ Yenile Jokeri kullanıldı — yeni bloklarla devam!');
+        return;
+      }
+
+      if (rescueType === 'single_star') {
+        const stock = boosterStock.single_star;
+        if (stock <= 0 && coins < 35) {
+          setStatusBannerText('1×1 Yıldız Jokeri için 35 Coin gerekli!');
+          return;
+        }
+        if (stock > 0) {
+          setBoosterStock((prev) => ({ ...prev, single_star: prev.single_star - 1 }));
+        } else {
+          setCoins((c) => c - 35);
+        }
+        const targetIdx = tray.findIndex((p) => !p.used);
+        const idxToConvert = targetIdx >= 0 ? targetIdx : 0;
+        setTray((prev) =>
+          prev.map((p, idx) =>
+            idx === idxToConvert ? { ...convertPieceToSingleStar(p), used: false } : p
+          )
+        );
+        setSelectedPieceIndex(idxToConvert);
+        setMovesRemaining((m) => Math.max(3, m + 3));
+        setFrozenSummary(null);
+        setShellState('playing');
+        soundSynth.playBooster();
+        setStatusBannerText('✨ 1×1 Yıldız Blok ile oyuna geri döndün!');
+      }
+    },
+    [board, boosterStock, coins, gameMode, lastChanceUsed, tray, turnIndex]
+  );
 
   // Meta Handlers
   const handleClaimStreakChest = (chestId: string) => {
@@ -675,7 +851,7 @@ export default function App() {
   const handleRecoverMissedDay = (day: number, method: 'gems' | 'ad') => {
     if (method === 'gems') {
       if (gems < 15) {
-        setStatusBannerText('Not enough Gems (15 required) — use Watch Ad for free save!');
+        setStatusBannerText('Yeterli Gem yok (15 Gem gerekli) — Ücretsiz Reklam ile kurtar!');
         return;
       }
       setGems((g) => g - 15);
@@ -693,12 +869,35 @@ export default function App() {
       return;
     }
     const skin = THEME_SKINS[skinId];
+    if (skin.costCoins && coins >= skin.costCoins) {
+      soundSynth.playVictory();
+      setCoins((c) => c - skin.costCoins!);
+      setUnlockedSkins((prev) => [...prev, skinId]);
+      setEquippedSkin(skinId);
+      return;
+    }
     if (gems >= skin.costGems) {
       soundSynth.playVictory();
       setGems((g) => g - skin.costGems);
       setUnlockedSkins((prev) => [...prev, skinId]);
       setEquippedSkin(skinId);
     }
+  };
+
+  const handleBuySingleBooster = (booster: BoosterType, costCoins: number) => {
+    if (coins < costCoins) {
+      setStatusBannerText(`Yeterli Coin yok (${costCoins} Coin gerekli)!`);
+      return;
+    }
+    soundSynth.playCoin();
+    setCoins((c) => c - costCoins);
+    setBoosterStock((prev) => ({ ...prev, [booster]: (prev[booster] || 0) + 1 }));
+  };
+
+  const handleGrantFreeCoins = (amount: number) => {
+    soundSynth.playCoin();
+    setCoins((c) => c + amount);
+    setStatusBannerText(`🎁 +${amount} Ücretsiz Coin eklendi!`);
   };
 
   const handlePurchaseBundle = (bundle: ShopBundle) => {
@@ -740,7 +939,34 @@ export default function App() {
   const handleToggleMute = useCallback(() => {
     soundSynth.isMuted = !soundSynth.isMuted;
     setIsMuted(soundSynth.isMuted);
-  }, []);
+    if (soundSynth.isMuted) {
+      soundSynth.setBgm(false);
+    } else if (bgmEnabled) {
+      soundSynth.setBgm(true);
+    }
+  }, [bgmEnabled]);
+
+  const handleToggleBgm = useCallback(() => {
+    const next = !bgmEnabled;
+    setBgmEnabled(next);
+    soundSynth.setBgm(next);
+  }, [bgmEnabled]);
+
+  const cyclePastelAndRelicTheme = useCallback(() => {
+    const order: ThemeSkinId[] = [
+      'pastel_blast',
+      'classic_video',
+      'sugar_cream',
+      'night_neon',
+      'mystic_forest',
+      'artisan_wood',
+    ];
+    const available = order.filter((id) => unlockedSkins.includes(id));
+    const idx = available.indexOf(equippedSkin);
+    const next = available[(idx + 1) % available.length] || 'pastel_blast';
+    soundSynth.playSelect();
+    setEquippedSkin(next);
+  }, [equippedSkin, unlockedSkins]);
 
   return (
     <main className="relative w-screen h-screen overflow-hidden select-none">
@@ -754,54 +980,64 @@ export default function App() {
         activeTargetingBooster={activeTargetingBooster}
         themeId={equippedSkin}
         burstSignal={burstSignal}
+        curtainSignal={curtainSignal}
         onSelectPiece={(idx) => setSelectedPieceIndex(idx)}
         onPlacePiece={handlePlacePiece}
         onUseTargetBooster={handleUseTargetBooster}
         onRotatePiece={handleRotatePiece}
         onRerollTray={handleRerollTray}
         onActivateBoosterMode={handleActivateBoosterMode}
-        onStartGame={() => startNewRun(gameMode, architecture, currentCampaignStage)}
+        onStartGame={() => startNewRun(gameMode, architecture, currentCampaignStage, true)}
         onTogglePause={handleTogglePause}
         onToggleMute={handleToggleMute}
       />
 
-      {/* 2. TITLE SCREEN STAGE */}
+      {/* 2. TITLE SCREEN STAGE (Merged Block Blast Pastel Edition + RelicGrid Odyssey) */}
       {shellState === 'title' && (
         <section
           aria-label="Title Screen"
           className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-6 md:p-12"
         >
-          <div className="max-w-xl w-full my-auto pointer-events-auto space-y-6 bg-[#07130F]/94 p-6 md:p-8 rounded-2xl border-2 border-[#D99B26]/75 shadow-2xl">
-            <RelicTitleEmblem className="w-full max-w-md" />
+          <div className="max-w-xl w-full my-auto pointer-events-auto space-y-5 bg-[#1B2748]/95 p-6 md:p-8 rounded-3xl border-2 border-[#FFD95A]/80 shadow-2xl">
+            <div className="flex items-center justify-between gap-3">
+              <RelicTitleEmblem className="w-full max-w-sm" />
+              <button
+                type="button"
+                onClick={cyclePastelAndRelicTheme}
+                className="px-3 py-1.5 rounded-full bg-white/15 hover:bg-white/25 border border-white/25 text-xs font-extrabold text-amber-200 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                🎨 {THEME_SKINS[equippedSkin].name}
+              </button>
+            </div>
 
-            <p className="text-sm text-emerald-100/85 leading-relaxed">
-              Master carved runic grids with multi-layer Frozen Relics, pulsating Bomb fuses, and
-              prismatic Wildcard surges. Climb your 30-player Weekly League cohort and complete
-              November&apos;s 30-piece Mystic Forest mosaic.
+            <p className="text-sm text-blue-100/90 leading-relaxed">
+              <strong>BLOCK BLAST: RelicGrid Pastel Edition</strong> — Yumuşak mat 3D pastel bloklar,
+              satır/sütun renk değiştiren patlama önizlemesi, yıldızlı elmas bloklar, 6 taktiksel
+              Joker, 500 Macera Bölümü ve 30 oyunculu Haftalık Lig tek oyunda birleşti!
             </p>
 
             {/* Game Mode Selection Tabs */}
             <div className="space-y-2">
-              <div className="text-xs font-semibold text-amber-300 uppercase tracking-wider">
-                Select Game Mode
+              <div className="text-xs font-bold text-amber-300 uppercase tracking-wider">
+                Oyun Modu Seç (Game Modes)
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {(
                   [
-                    { id: 'classic', label: 'Classic Endless' },
-                    { id: 'daily', label: 'Daily Puzzle' },
-                    { id: 'blitz', label: 'Time Blitz' },
-                    { id: 'campaign', label: '500 Campaigns' },
+                    { id: 'classic', label: '♾️ Klasik Sonsuz' },
+                    { id: 'campaign', label: '🗺️ Macera (500)' },
+                    { id: 'daily', label: '📅 Günlük Görev' },
+                    { id: 'blitz', label: '⏱️ Time Blitz' },
                   ] as const
                 ).map((m) => (
                   <button
                     key={m.id}
                     type="button"
                     onClick={() => setGameMode(m.id)}
-                    className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
+                    className={`py-2 px-3 rounded-xl text-xs font-bold transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
                       gameMode === m.id
-                        ? 'bg-amber-500 text-slate-950 border-amber-300 font-bold'
-                        : 'bg-[#0E241C] text-emerald-100 border-[#1D4033] hover:border-amber-400/50'
+                        ? 'bg-amber-400 text-slate-950 border-amber-200 shadow-md'
+                        : 'bg-[#24345E] text-blue-100 border-white/15 hover:border-amber-300/60'
                     }`}
                   >
                     {m.label}
@@ -812,26 +1048,26 @@ export default function App() {
 
             {/* Variable Grid Architecture Selector */}
             <div className="space-y-2">
-              <div className="text-xs font-semibold text-amber-300 uppercase tracking-wider">
-                Grid Architecture
+              <div className="text-xs font-bold text-amber-300 uppercase tracking-wider">
+                Tahta Mimarisi (Grid Architecture)
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {(
                   [
-                    { id: 'standard', label: 'Standard 8x8' },
-                    { id: 'holed', label: 'Holed 2x2' },
-                    { id: 'shifting', label: 'Shifting Rows' },
-                    { id: 'l_shaped', label: 'L-Shaped' },
+                    { id: 'standard', label: 'Standart 8×8' },
+                    { id: 'holed', label: 'Delikli 2×2' },
+                    { id: 'shifting', label: 'Kayan Satırlar' },
+                    { id: 'l_shaped', label: 'L-Tahta' },
                   ] as const
                 ).map((arch) => (
                   <button
                     key={arch.id}
                     type="button"
                     onClick={() => setArchitecture(arch.id)}
-                    className={`py-1.5 px-2.5 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
+                    className={`py-1.5 px-2.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
                       architecture === arch.id
-                        ? 'bg-emerald-700 text-white border-emerald-300 font-bold'
-                        : 'bg-[#0B1C16] text-emerald-200/75 border-[#1D4033] hover:text-white'
+                        ? 'bg-emerald-500 text-slate-950 border-emerald-200 font-extrabold'
+                        : 'bg-[#172342] text-blue-100/80 border-white/15 hover:text-white'
                     }`}
                   >
                     {arch.label}
@@ -841,110 +1077,112 @@ export default function App() {
             </div>
 
             {/* Primary Start CTA + Meta Quick Links */}
-            <div className="flex flex-wrap items-center gap-3 pt-2">
+            <div className="flex flex-wrap items-center gap-2.5 pt-2">
               <button
                 type="button"
                 data-start="true"
-                onClick={() => startNewRun(gameMode, architecture, currentCampaignStage)}
-                className="flex-1 py-3.5 px-6 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-extrabold text-base tracking-wider shadow-lg transition-transform active:scale-98 cursor-pointer whitespace-nowrap"
+                onClick={() => startNewRun(gameMode, architecture, currentCampaignStage, true)}
+                className="flex-1 py-3.5 px-6 rounded-2xl bg-gradient-to-b from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-display font-extrabold text-base tracking-wider shadow-lg transition-transform active:scale-98 cursor-pointer whitespace-nowrap"
               >
-                Start Odyssey
+                ▶ OYUNA BAŞLA (Start Odyssey)
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveModal('shop')}
+                className="py-3.5 px-4 rounded-2xl bg-[#24345E] hover:bg-[#2F4378] border border-amber-300/50 text-amber-200 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+              >
+                🛒 Market & Temalar
               </button>
               <button
                 type="button"
                 onClick={() => setActiveModal('daily')}
-                className="py-3.5 px-4 rounded-xl bg-[#122A21] hover:bg-[#193A2E] border border-amber-400/50 text-amber-200 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                className="py-3.5 px-3.5 rounded-2xl bg-[#24345E] hover:bg-[#2F4378] border border-emerald-300/40 text-emerald-200 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
               >
-                Daily Streak ({currentStreak}d)
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveModal('league')}
-                className="py-3.5 px-4 rounded-xl bg-[#122A21] hover:bg-[#193A2E] border border-emerald-400/40 text-emerald-200 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
-              >
-                League (#{playerLeagueRank})
+                🔥 Seri ({currentStreak}g)
               </button>
               <button
                 type="button"
                 onClick={() => setIsGodotModalOpen(true)}
-                className="py-3.5 px-4 rounded-xl bg-[#14293A] hover:bg-[#1D3B52] border border-[#478CBF] text-[#9AD4FF] text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+                className="py-3.5 px-3.5 rounded-2xl bg-[#14293A] hover:bg-[#1D3B52] border border-[#478CBF] text-[#9AD4FF] text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
               >
-                Godot 4 Çıktı (.ZIP)
+                Godot 4 (.ZIP)
               </button>
             </div>
           </div>
 
-          <div className="text-xs text-emerald-200/80 font-mono-tabular tracking-wide">
-            1-3 Select Piece · Drag or WASD/Arrows Place · Space Confirm · R Rotate · H Hammer · F Reroll · Esc Pause
+          <div className="text-xs text-blue-100/85 font-mono-tabular tracking-wide">
+            1-3 Parça Seç · Sürükle veya Ok Tuşları · Space Yerleştir · R Döndür · H Çekiç · F Yenile · B 3×3 Bomba · L Lazer · G 1×1 Yıldız
           </div>
         </section>
       )}
 
-      {/* 3. MOBILE-FIRST VERTICALLY STACKED GAMEPLAY SHELL (Top HUD -> Board/Tray -> Bottom Booster Bar) */}
+      {/* 3. MOBILE-FIRST VERTICALLY STACKED GAMEPLAY SHELL (Top HUD -> Board/Tray -> Bottom 6-Joker Bar) */}
       {shellState !== 'title' && (
         <div className="fixed inset-0 z-10 pointer-events-none flex flex-col justify-between items-center px-2.5 py-2 sm:py-3">
-          {/* STREAMLINED TOP HUD (Centered Mobile Container) */}
-          <header className="w-full max-w-[460px] pointer-events-auto flex flex-col gap-1.5 bg-[#07140F]/95 px-2.5 sm:px-3.5 py-2 rounded-2xl border border-[#D99B26]/55 shadow-xl">
-            {/* Top Sub-Row: Currencies, Sanctuary Hub Triggers & Settings/Pause Controls */}
-            <div className="flex items-center justify-between gap-1 border-b border-[#18382C] pb-1.5">
-              {/* Compact Currency & Streak Readout */}
-              <div className="flex items-center gap-1 sm:gap-1.5 text-[11px] sm:text-xs font-mono-tabular shrink-0">
+          {/* STREAMLINED BLOCK BLAST PASTEL + RELIC TOP HUD */}
+          <header className="w-full max-w-[468px] pointer-events-auto flex flex-col gap-1.5 bg-[#1B284B]/92 backdrop-blur-md px-2.5 sm:px-3.5 py-2 rounded-2xl border border-[#FFD95A]/55 shadow-xl">
+            {/* Top Sub-Row: Crown Best, Milestone Progress Pill, Currencies, Hub Pills & Settings */}
+            <div className="flex items-center justify-between gap-1 border-b border-white/15 pb-1.5">
+              {/* Compact Currency, Milestone & Streak Readout */}
+              <div className="flex items-center gap-1.5 text-[11px] sm:text-xs font-mono-tabular shrink-0">
                 <button
                   type="button"
                   onClick={() => setActiveModal('shop')}
-                  className="flex items-center gap-0.5 text-amber-300 font-bold hover:text-amber-200 cursor-pointer"
-                  title="Soft Currency (Coins) · Open Relic Shop"
+                  className="flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-amber-300 font-extrabold cursor-pointer"
+                  title="Altın (Coins) · Market & Jokerler"
                 >
                   <CoinIcon className="w-3.5 h-3.5 shrink-0" />
                   <span data-testid="hud-coins">{Math.round(coins)}</span>
                 </button>
-                <span className="text-emerald-700" aria-hidden="true">·</span>
                 <button
                   type="button"
                   onClick={() => setActiveModal('shop')}
-                  className="flex items-center gap-0.5 text-purple-300 font-bold hover:text-purple-200 cursor-pointer"
-                  title="Hard Currency (Gems)"
+                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-purple-200 font-extrabold cursor-pointer"
+                  title="Elmas (Gems)"
                 >
                   <GemIcon className="w-3.5 h-3.5 shrink-0" />
                   <span data-testid="hud-gems">{Math.round(gems)}</span>
                 </button>
-                <span className="text-emerald-700" aria-hidden="true">·</span>
-                <button
-                  type="button"
-                  onClick={() => setActiveModal('daily')}
-                  className="flex items-center gap-0.5 text-orange-300 font-bold hover:text-orange-200 cursor-pointer"
-                  title="Daily Login Streak & Mosaic"
+                {/* Block Blast Milestone Progress Pill */}
+                <div
+                  className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/30 border border-white/15"
+                  title="Hedef / Seviye İlerlemesi"
                 >
-                  <FlameStreakIcon className="w-3.5 h-3.5 shrink-0" />
-                  <span>{currentStreak}d</span>
-                </button>
+                  <div className="w-10 h-2 rounded-full bg-black/50 overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-emerald-400 to-amber-300 transition-all duration-300"
+                      style={{ width: `${milestonePct}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] font-extrabold text-white">{milestonePct}%</span>
+                </div>
               </div>
 
-              {/* Compact Meta Hub Pills (Daily, Campaign, League, Shop) */}
+              {/* Compact Meta Hub Pills (Daily, Campaign, League, Shop, Godot) */}
               <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
                   onClick={() => setActiveModal('daily')}
                   aria-label={`Daily Mosaic ${currentStreak}d Streak`}
-                  className="flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-md bg-[#0D231B] hover:bg-[#153529] border border-[#1E4435] text-[10px] sm:text-[11px] font-semibold text-emerald-100 cursor-pointer transition-colors whitespace-nowrap"
+                  className="flex items-center gap-0.5 px-1.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 border border-white/15 text-[10px] font-bold text-orange-200 cursor-pointer transition-colors whitespace-nowrap"
                 >
-                  <CalendarIcon className="hidden sm:block w-3 h-3 shrink-0" />
-                  <span>Daily</span>
+                  <FlameStreakIcon className="w-3 h-3 shrink-0" />
+                  <span>{currentStreak}g</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveModal('campaign')}
                   aria-label={`500 Campaigns Stage ${currentCampaignStage}`}
-                  className="flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-md bg-[#0D231B] hover:bg-[#153529] border border-[#1E4435] text-[10px] sm:text-[11px] font-semibold text-emerald-100 cursor-pointer transition-colors whitespace-nowrap"
+                  className="flex items-center gap-0.5 px-1.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 border border-white/15 text-[10px] font-bold text-emerald-100 cursor-pointer transition-colors whitespace-nowrap"
                 >
                   <MapIcon className="hidden sm:block w-3 h-3 shrink-0" />
-                  <span>Stg {currentCampaignStage}</span>
+                  <span>Blm {currentCampaignStage}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveModal('league')}
                   aria-label={`Weekly League Rank #${playerLeagueRank}`}
-                  className="flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-md bg-[#0D231B] hover:bg-[#153529] border border-[#1E4435] text-[10px] sm:text-[11px] font-semibold text-amber-200 cursor-pointer transition-colors whitespace-nowrap"
+                  className="flex items-center gap-0.5 px-1.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 border border-white/15 text-[10px] font-bold text-amber-200 cursor-pointer transition-colors whitespace-nowrap"
                 >
                   <TrophyIcon className="hidden sm:block w-3 h-3 shrink-0" />
                   <span>#{playerLeagueRank}</span>
@@ -953,23 +1191,23 @@ export default function App() {
                   type="button"
                   onClick={() => setActiveModal('shop')}
                   aria-label={`Relic Shop ${THEME_SKINS[equippedSkin].name}`}
-                  className="flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-md bg-[#0D231B] hover:bg-[#153529] border border-[#1E4435] text-[10px] sm:text-[11px] font-semibold text-amber-300 cursor-pointer transition-colors whitespace-nowrap"
+                  className="flex items-center gap-0.5 px-1.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 border border-white/15 text-[10px] font-bold text-amber-300 cursor-pointer transition-colors whitespace-nowrap"
                 >
                   <ShopIcon className="hidden sm:block w-3 h-3 shrink-0" />
-                  <span>Shop</span>
+                  <span>Market</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setIsGodotModalOpen(true)}
                   aria-label="Godot 4 Export Studio"
                   title="Godot 4.3+ Proje & Kaynak Kod Paketi İndir"
-                  className="flex items-center gap-0.5 px-1.5 py-1 rounded-md bg-[#122636] hover:bg-[#1A364D] border border-[#478CBF] text-[10px] sm:text-[11px] font-bold text-[#9AD4FF] cursor-pointer transition-colors whitespace-nowrap"
+                  className="flex items-center gap-0.5 px-1.5 py-1 rounded-lg bg-[#122636] hover:bg-[#1A364D] border border-[#478CBF] text-[10px] font-bold text-[#9AD4FF] cursor-pointer transition-colors whitespace-nowrap"
                 >
                   <span>G4</span>
                 </button>
               </div>
 
-              {/* Compact Utility Controls: Mute [M], Pause [P], Restart */}
+              {/* Compact Utility Controls: Mute [M], Pause/Settings [P], Curtain Restart */}
               <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
@@ -979,7 +1217,7 @@ export default function App() {
                     e.currentTarget.blur();
                     handleToggleMute();
                   }}
-                  className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-md bg-[#0D231B] hover:bg-[#16382B] border border-[#1E4435] cursor-pointer transition-colors"
+                  className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 border border-white/15 cursor-pointer transition-colors"
                 >
                   <MuteIcon muted={isMuted} className="w-3.5 h-3.5" />
                 </button>
@@ -991,7 +1229,7 @@ export default function App() {
                     e.currentTarget.blur();
                     handleTogglePause();
                   }}
-                  className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-md bg-[#0D231B] hover:bg-[#16382B] border border-[#1E4435] cursor-pointer transition-colors"
+                  className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 border border-white/15 cursor-pointer transition-colors"
                 >
                   <PauseIcon className="w-3.5 h-3.5" />
                 </button>
@@ -1001,104 +1239,128 @@ export default function App() {
                   aria-label="Restart Run"
                   onClick={(e) => {
                     e.currentTarget.blur();
-                    startNewRun(gameMode, architecture, currentCampaignStage);
+                    startNewRun(gameMode, architecture, currentCampaignStage, true);
                   }}
-                  className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-md bg-[#0D231B] hover:bg-[#16382B] border border-[#1E4435] cursor-pointer transition-colors"
+                  className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 border border-white/15 cursor-pointer transition-colors"
                 >
                   <RestartIcon className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
 
-            {/* Bottom Sub-Row: Glowing Hero Score, High Score / Best, Combo & Mode Objective Indicator */}
-            <div className="flex items-center justify-between gap-3 pt-0.5">
-              <div className="flex items-center gap-4">
-                <div>
-                  <div className="text-[9px] font-bold uppercase tracking-widest text-amber-300/80">
-                    SCORE
-                  </div>
-                  <div
-                    data-testid="hud-score"
-                    className="text-2xl sm:text-3xl font-extrabold text-amber-300 hud-numeral leading-none"
-                  >
-                    {Math.round(score)}
+            {/* Bottom Sub-Row: Glowing Hero Score with Beating Heart Combo Aura, Crown Best, & Objectives */}
+            <div className="flex items-center justify-between gap-2 pt-0.5">
+              <div className="flex items-center gap-3">
+                {/* Hero Score + Beating Glowing Heart Combo Aura */}
+                <div className="relative flex items-center gap-1.5">
+                  {comboStreak > 0 && (
+                    <span
+                      id="comboHeartAura"
+                      aria-hidden="true"
+                      className="text-xl sm:text-2xl animate-pulse drop-shadow-[0_0_12px_rgba(255,94,132,0.95)]"
+                    >
+                      💖
+                    </span>
+                  )}
+                  <div>
+                    <div className="text-[9px] font-bold uppercase tracking-widest text-amber-200/85">
+                      SKOR {comboStreak > 0 ? `· COMBO ${comboStreak}x` : ''}
+                    </div>
+                    <div
+                      data-testid="hud-score"
+                      className="text-2xl sm:text-3xl font-extrabold text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.38)] hud-numeral leading-none"
+                    >
+                      {Math.round(score)}
+                    </div>
                   </div>
                 </div>
 
-                <div className="h-7 w-px bg-[#18382C]" />
+                <div className="h-7 w-px bg-white/15" />
 
+                {/* Crown High Score / Best */}
                 <div>
-                  <div className="text-[9px] font-bold uppercase tracking-widest text-emerald-300/75">
-                    BEST
+                  <div className="text-[9px] font-bold uppercase tracking-widest text-amber-300/90 flex items-center gap-0.5">
+                    <span>👑</span>
+                    <span>REKOR</span>
                   </div>
-                  <div className="text-base font-bold text-emerald-100 hud-numeral leading-none mt-0.5">
+                  <div className="text-base font-extrabold text-amber-300 hud-numeral leading-none mt-0.5">
                     {Math.round(bestScore)}
                   </div>
                 </div>
-
-                {comboStreak > 0 && (
-                  <>
-                    <div className="h-7 w-px bg-[#18382C]" />
-                    <div>
-                      <div className="text-[9px] font-bold uppercase tracking-widest text-amber-200">
-                        COMBO
-                      </div>
-                      <div className="text-base font-extrabold text-amber-400 hud-numeral leading-none mt-0.5">
-                        {comboStreak}x
-                      </div>
-                    </div>
-                  </>
-                )}
               </div>
 
-              {/* Mode / Stage Objective Indicator */}
-              <div className="text-right text-xs">
-                <div className="font-bold text-amber-200 uppercase tracking-wide text-[11px]">
-                  {gameMode === 'classic' && `Classic · ${architecture.replace('_', ' ')}`}
-                  {gameMode === 'daily' && `Daily · ${movesRemaining} Moves Left`}
-                  {gameMode === 'blitz' && `Blitz · ${Math.round(blitzSecondsLeft)}s`}
-                  {gameMode === 'campaign' && `Stage ${currentCampaignStage} · ${movesRemaining}m`}
+              {/* Mode / Stage Objective Indicator + Quick Theme Toggle */}
+              <div className="text-right text-xs flex flex-col items-end">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={cyclePastelAndRelicTheme}
+                    className="px-1.5 py-0.5 rounded bg-white/10 hover:bg-white/20 border border-white/15 text-[10px] font-bold text-amber-200 cursor-pointer"
+                    title="Temayı Değiştir"
+                  >
+                    🎨 {THEME_SKINS[equippedSkin].name.split(' ')[0]}
+                  </button>
+                  <span className="font-extrabold text-amber-200 uppercase tracking-wide text-[11px]">
+                    {gameMode === 'classic' && `Klasik · ${architecture.replace('_', ' ')}`}
+                    {gameMode === 'daily' && `Günlük · ${movesRemaining} Hamle`}
+                    {gameMode === 'blitz' && `Blitz · ${Math.round(blitzSecondsLeft)}sn`}
+                    {gameMode === 'campaign' && `Blm ${currentCampaignStage} · ${movesRemaining}h`}
+                  </span>
                 </div>
-                <div className="text-[11px] text-emerald-200/80 font-mono-tabular truncate max-w-[190px]">
+                <div className="text-[11px] text-blue-100/85 font-mono-tabular truncate max-w-[205px] mt-0.5">
                   {(gameMode === 'daily' || gameMode === 'campaign') && objectives.length > 0
-                    ? objectives.map((o) => `${o.label.split(' ')[1] || o.label}: ${o.current}/${o.target}`).join(' · ')
-                    : `${THEME_SKINS[equippedSkin].name} · ${linesClearedRun} Lines`}
+                    ? objectives
+                        .map((o) => `${o.label.split(' ')[0]}: ${o.current}/${o.target}`)
+                        .join(' · ')
+                    : `${linesClearedRun} Satır Patlatıldı · ${milestonePct}%`}
                 </div>
               </div>
             </div>
           </header>
 
-          {/* DEDICATED BOTTOM BOOSTER BAR (Docked Horizontal Circular Action Buttons) */}
+          {/* DEDICATED BOTTOM 6-JOKER / BOOSTER TACTICAL BAR */}
           <footer
             aria-label="Strategic Boosters Dock"
-            className="w-full max-w-[460px] pointer-events-auto flex flex-col items-center gap-1.5 bg-[#07140F]/95 px-4 py-2 rounded-2xl border border-[#D99B26]/55 shadow-xl"
+            className="w-full max-w-[468px] pointer-events-auto flex flex-col items-center gap-1 bg-[#1B284B]/92 backdrop-blur-md px-2.5 py-2 rounded-2xl border border-[#FFD95A]/55 shadow-xl"
           >
-            <div className="w-full flex items-center justify-around gap-2">
+            <div className="w-full grid grid-cols-6 gap-1">
               {(
                 [
                   {
                     type: 'rotate' as const,
-                    label: 'Rotate',
+                    label: 'Döndür',
                     keyHint: '[R]',
-                    icon: <RotateIcon className="w-5 h-5" />,
+                    icon: <RotateIcon className="w-4 h-4 sm:w-5 sm:h-5" />,
                   },
                   {
                     type: 'hammer' as const,
-                    label: 'Hammer',
+                    label: 'Çekiç',
                     keyHint: '[H]',
-                    icon: <HammerIcon className="w-5 h-5" />,
+                    icon: <HammerIcon className="w-4 h-4 sm:w-5 sm:h-5" />,
                   },
                   {
                     type: 'reroll' as const,
-                    label: 'Refresh',
+                    label: 'Yenile',
                     keyHint: '[F]',
-                    icon: <RerollIcon className="w-5 h-5" />,
+                    icon: <RerollIcon className="w-4 h-4 sm:w-5 sm:h-5" />,
                   },
                   {
                     type: 'bomb_blast' as const,
-                    label: 'Bomb 3x3',
+                    label: '3×3 Bomba',
                     keyHint: '[B]',
-                    icon: <BombIcon className="w-5 h-5" />,
+                    icon: <BombIcon className="w-4 h-4 sm:w-5 sm:h-5" />,
+                  },
+                  {
+                    type: 'laser' as const,
+                    label: 'Lazer',
+                    keyHint: '[L]',
+                    icon: <span className="text-base sm:text-lg leading-none">⚡</span>,
+                  },
+                  {
+                    type: 'single_star' as const,
+                    label: '1×1 Yıldız',
+                    keyHint: '[G]',
+                    icon: <span className="text-base sm:text-lg leading-none">✨</span>,
                   },
                 ]
               ).map((b) => {
@@ -1117,60 +1379,48 @@ export default function App() {
                     className="group flex flex-col items-center gap-0.5 cursor-pointer disabled:cursor-not-allowed disabled:opacity-45"
                   >
                     <div
-                      className={`relative w-12 h-12 sm:w-13 sm:h-13 rounded-full flex items-center justify-center border-2 transition-transform group-hover:scale-105 group-active:scale-95 shadow-md ${
+                      className={`relative w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center border-2 transition-transform group-hover:scale-105 group-active:scale-95 shadow-md ${
                         isArmed
-                          ? 'bg-amber-500/30 border-amber-300 ring-2 ring-amber-400/50'
+                          ? 'bg-amber-400/35 border-amber-200 ring-2 ring-amber-300/60'
                           : isMaxed
-                            ? 'bg-[#06100C] border-[#152E24]'
-                            : 'bg-gradient-to-b from-[#133227] to-[#0A1D16] border-[#D99B26]/70 group-hover:border-amber-300'
+                            ? 'bg-slate-950/70 border-slate-700'
+                            : 'bg-gradient-to-b from-[#2A3E73] to-[#1A274B] border-[#FFD95A]/75 group-hover:border-amber-200'
                       }`}
                     >
                       {b.icon}
 
                       {/* Floating Stock or Compounding Coin Cost Badge */}
                       <span
-                        className={`absolute -top-1 -right-1.5 px-1.5 py-0.2 rounded-full text-[10px] font-mono-tabular font-extrabold border shadow ${
+                        className={`absolute -top-1 -right-1 px-1 py-0.2 rounded-full text-[9px] font-mono-tabular font-extrabold border shadow ${
                           isMaxed
                             ? 'bg-red-950 text-red-300 border-red-400/50'
                             : stock > 0
-                              ? 'bg-emerald-600 text-white border-emerald-200'
-                              : 'bg-amber-500 text-slate-950 border-amber-200'
+                              ? 'bg-emerald-500 text-slate-950 border-emerald-100'
+                              : 'bg-amber-400 text-slate-950 border-amber-100'
                         }`}
                       >
                         {isMaxed ? 'CAP' : stock > 0 ? `x${stock}` : `${cost}c`}
                       </span>
                     </div>
 
-                    {/* Label + 3-Use Session Cap Dots */}
-                    <div className="flex items-center gap-1 mt-0.5">
-                      <span className="text-[10px] font-bold text-emerald-100 whitespace-nowrap">
-                        {b.label} <span className="text-amber-300 font-mono-tabular">{b.keyHint}</span>
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1" title={`${uses}/3 used this session`}>
-                      {[0, 1, 2].map((dotIdx) => (
-                        <span
-                          key={dotIdx}
-                          className={`w-1.5 h-1.5 rounded-full ${
-                            dotIdx < uses ? 'bg-amber-400' : 'bg-emerald-900'
-                          }`}
-                        />
-                      ))}
-                    </div>
+                    {/* Label + Key Hint */}
+                    <span className="text-[9px] sm:text-[10px] font-bold text-blue-50 whitespace-nowrap leading-tight">
+                      {b.label} <span className="text-amber-300 font-mono-tabular">{b.keyHint}</span>
+                    </span>
                   </button>
                 );
               })}
             </div>
 
             {/* Subtle Contextual Status Strip */}
-            <div className="w-full text-center text-[11px] text-emerald-200/85 truncate border-t border-[#163328] pt-1">
+            <div className="w-full text-center text-[11px] text-blue-100/90 truncate border-t border-white/15 pt-1">
               {statusBannerText}
             </div>
           </footer>
         </div>
       )}
 
-      {/* 4. PAUSE MODAL (body[data-state="paused"]) */}
+      {/* 4. PAUSE & BLOCK BLAST SETTINGS MODAL (body[data-state="paused"]) */}
       {shellState === 'paused' && (
         <div
           role="dialog"
@@ -1178,55 +1428,108 @@ export default function App() {
           aria-label="Game Paused"
           className="fixed inset-0 z-30 flex items-center justify-center p-4 bg-black/75 pointer-events-auto"
         >
-          <div className="w-full max-w-md p-6 rounded-2xl bg-[#0B1C16] border-2 border-[#D99B26] shadow-2xl text-center space-y-5">
-            <h2 className="font-display text-2xl font-bold text-amber-300">Sanctuary Paused</h2>
-            <p className="text-xs text-emerald-200/80">
-              Take a breath, Relic Seeker. Your board state and combo streak are preserved.
+          <div className="w-full max-w-md p-6 rounded-3xl bg-[#1F2C52] border-2 border-[#FFD95A] shadow-2xl text-center space-y-4">
+            <h2 className="font-display text-2xl font-extrabold text-amber-300">
+              ⚙️ Ayarlar & Duraklatma
+            </h2>
+            <p className="text-xs text-blue-100/80">
+              Tahta durumun, kombo serin ve aktif blokların korunuyor.
             </p>
 
-            <div className="grid grid-cols-3 gap-2.5 p-3 rounded-xl bg-[#07130F] border border-[#1D4033] font-mono-tabular">
+            {/* Sound Effects & Relaxing Procedural BGM Switches */}
+            <div className="space-y-2 text-left">
+              <div className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-black/25 border border-white/10">
+                <span className="text-xs font-bold text-white">🔊 Ses Efektleri (SFX)</span>
+                <button
+                  type="button"
+                  onClick={handleToggleMute}
+                  className={`px-3 py-1 rounded-full text-xs font-extrabold cursor-pointer transition-colors ${
+                    !isMuted
+                      ? 'bg-emerald-400 text-slate-950'
+                      : 'bg-slate-700 text-slate-300'
+                  }`}
+                >
+                  {!isMuted ? 'AÇIK' : 'KAPALI'}
+                </button>
+              </div>
+              <div className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-black/25 border border-white/10">
+                <span className="text-xs font-bold text-white">🎵 Rahatlatıcı Müzik (BGM)</span>
+                <button
+                  type="button"
+                  onClick={handleToggleBgm}
+                  className={`px-3 py-1 rounded-full text-xs font-extrabold cursor-pointer transition-colors ${
+                    bgmEnabled
+                      ? 'bg-emerald-400 text-slate-950'
+                      : 'bg-slate-700 text-slate-300'
+                  }`}
+                >
+                  {bgmEnabled ? 'AÇIK' : 'KAPALI'}
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2.5 p-3 rounded-2xl bg-black/30 border border-white/10 font-mono-tabular">
               <div>
-                <div className="text-[10px] text-emerald-300/70 uppercase">SCORE</div>
+                <div className="text-[10px] text-blue-200/70 uppercase">SKOR</div>
                 <div className="text-lg font-bold text-amber-300">{Math.round(score)}</div>
               </div>
               <div>
-                <div className="text-[10px] text-emerald-300/70 uppercase">LINES</div>
+                <div className="text-[10px] text-blue-200/70 uppercase">SATIR</div>
                 <div className="text-lg font-bold text-white">{linesClearedRun}</div>
               </div>
               <div>
-                <div className="text-[10px] text-emerald-300/70 uppercase">LEAGUE</div>
+                <div className="text-[10px] text-blue-200/70 uppercase">LİG</div>
                 <div className="text-lg font-bold text-emerald-300">#{playerLeagueRank}</div>
               </div>
             </div>
 
-            <div className="flex flex-col gap-2.5">
+            <div className="flex flex-col gap-2">
               <button
                 type="button"
                 onClick={() => setShellState('playing')}
-                className="w-full py-3 px-5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm cursor-pointer transition-colors"
+                className="w-full py-3 px-5 rounded-2xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-sm cursor-pointer transition-colors"
               >
-                Resume Odyssey
+                ▶ Oyuna Devam Et (Resume)
               </button>
               <button
                 type="button"
-                onClick={() => startNewRun(gameMode, architecture, currentCampaignStage)}
-                className="w-full py-2.5 px-5 rounded-xl bg-[#122A21] hover:bg-[#193A2E] border border-[#1D4033] text-emerald-100 font-semibold text-xs cursor-pointer transition-colors"
+                onClick={() => startNewRun(gameMode, architecture, currentCampaignStage, true)}
+                className="w-full py-2.5 px-5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs cursor-pointer transition-colors"
               >
-                Restart Stage
+                🔄 Yeniden Başlat (Perde Geçişi)
               </button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShellState('playing');
+                    setActiveModal('shop');
+                  }}
+                  className="py-2.5 px-3 rounded-2xl bg-white/10 hover:bg-white/20 border border-white/15 text-amber-200 font-bold text-xs cursor-pointer transition-colors"
+                >
+                  🎨 Tema & Market
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsGodotModalOpen(true)}
+                  className="py-2.5 px-3 rounded-2xl bg-[#14293A] hover:bg-[#1D3B52] border border-[#478CBF] text-[#9AD4FF] font-bold text-xs cursor-pointer transition-colors"
+                >
+                  📦 Godot 4 (.ZIP)
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={() => setShellState('title')}
-                className="w-full py-2.5 px-5 rounded-xl bg-[#07130F] hover:bg-[#0E241C] border border-[#1D4033] text-emerald-300/80 font-semibold text-xs cursor-pointer transition-colors"
+                className="w-full py-2.5 px-5 rounded-2xl bg-black/35 hover:bg-black/50 border border-white/15 text-blue-100/80 font-semibold text-xs cursor-pointer transition-colors"
               >
-                Return to Title Screen
+                🏠 Ana Ekrana Dön (Title Screen)
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* 5. VICTORY / GAME OVER MODAL (body[data-state="gameover"]) */}
+      {/* 5. VICTORY / OUT-OF-MOVES JOKER RESCUE MODAL (body[data-state="gameover"]) */}
       {shellState === 'gameover' && frozenSummary && (
         <div
           role="dialog"
@@ -1234,33 +1537,33 @@ export default function App() {
           aria-label={frozenSummary.outcome === 'victory' ? 'Stage Clear Victory' : 'Game Over'}
           className="fixed inset-0 z-30 flex items-center justify-center p-4 bg-black/80 pointer-events-auto"
         >
-          <div className="w-full max-w-md p-6 rounded-2xl bg-[#0B1C16] border-2 border-[#D99B26] shadow-2xl text-center space-y-5">
+          <div className="w-full max-w-md p-6 rounded-3xl bg-[#1F2C52] border-2 border-[#FFD95A] shadow-2xl text-center space-y-4">
             <div>
-              <div className="text-xs font-bold uppercase tracking-widest text-amber-400">
-                {frozenSummary.outcome === 'victory' ? 'Sanctuary Cleared' : 'Board Locked'}
+              <div className="text-xs font-extrabold uppercase tracking-widest text-amber-300">
+                {frozenSummary.outcome === 'victory' ? '🎉 BÖLÜM TAMAMLANDI!' : '😮 HAMLE KALMADI!'}
               </div>
               <h2 className="font-display text-2xl font-extrabold text-white mt-1">
                 {frozenSummary.outcome === 'victory'
-                  ? 'Relic Mastery Achieved!'
-                  : 'No Valid Placements Left'}
+                  ? 'Relic & Pastel Zaferi!'
+                  : 'Joker Kullanıp Devam Et veya Yeni Oyun Başlat'}
               </h2>
             </div>
 
-            <div className="grid grid-cols-3 gap-2.5 p-3.5 rounded-xl bg-[#07130F] border border-[#1D4033] font-mono-tabular">
+            <div className="grid grid-cols-3 gap-2.5 p-3.5 rounded-2xl bg-black/30 border border-white/15 font-mono-tabular">
               <div>
-                <div className="text-[10px] text-emerald-300/70 uppercase">SCORE / BEST</div>
+                <div className="text-[10px] text-blue-200/75 uppercase">SKOR / REKOR</div>
                 <div className="text-sm font-bold text-amber-300 mt-0.5">
                   {Math.round(frozenSummary.score)} / {Math.round(frozenSummary.bestScore)}
                 </div>
               </div>
               <div>
-                <div className="text-[10px] text-emerald-300/70 uppercase">LINES CLEARED</div>
+                <div className="text-[10px] text-blue-200/75 uppercase">PATLAYAN SATIR</div>
                 <div className="text-sm font-bold text-white mt-0.5">
                   {frozenSummary.linesClearedTotal}
                 </div>
               </div>
               <div>
-                <div className="text-[10px] text-emerald-300/70 uppercase">COINS EARNED</div>
+                <div className="text-[10px] text-blue-200/75 uppercase">KAZANILAN COİN</div>
                 <div className="text-sm font-bold text-emerald-300 mt-0.5">
                   +{frozenSummary.coinsEarnedRun}
                 </div>
@@ -1283,23 +1586,56 @@ export default function App() {
                       : null
                   );
                 }}
-                className="w-full py-2.5 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-600 border border-emerald-300 text-white font-bold text-xs cursor-pointer transition-colors"
+                className="w-full py-2.5 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-300 text-white font-bold text-xs cursor-pointer transition-colors"
               >
-                Watch Rewarded Ad · Double Payout (+{frozenSummary.coinsEarnedRun} Bonus Coins)
+                🎁 Ödülü İkiye Katla (+{frozenSummary.coinsEarnedRun} Bonus Coin)
               </button>
             )}
 
-            {frozenSummary.outcome === 'defeat' && !lastChanceUsed && (
-              <button
-                type="button"
-                onClick={handleLastChanceContinue}
-                className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-300 text-white font-bold text-xs cursor-pointer transition-colors"
-              >
-                Last Chance Continue (Watch Ad · Clear 3x3 Center & Keep Playing)
-              </button>
+            {/* Block Blast Out-of-Moves Joker Rescue Grid */}
+            {frozenSummary.outcome === 'defeat' && (
+              <div className="space-y-2 text-left bg-black/25 p-3 rounded-2xl border border-white/10">
+                <div className="text-[11px] font-extrabold text-amber-300 uppercase tracking-wider text-center">
+                  ⚡ Joker ile Oyunu Kurtar (Keep Playing)
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleOutOfMovesJokerRescue('reroll')}
+                    className="p-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 flex flex-col items-center gap-0.5 cursor-pointer"
+                  >
+                    <span className="text-sm font-extrabold text-white">↻ Blokları Yenile</span>
+                    <span className="text-[10px] font-bold text-amber-300">
+                      {boosterStock.reroll > 0 ? `Stoktan (x${boosterStock.reroll})` : '🪙 25 Coin'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOutOfMovesJokerRescue('single_star')}
+                    className="p-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 flex flex-col items-center gap-0.5 cursor-pointer"
+                  >
+                    <span className="text-sm font-extrabold text-white">✨ 1×1 Yıldız Blok</span>
+                    <span className="text-[10px] font-bold text-amber-300">
+                      {boosterStock.single_star > 0
+                        ? `Stoktan (x${boosterStock.single_star})`
+                        : '🪙 35 Coin'}
+                    </span>
+                  </button>
+                </div>
+
+                {!lastChanceUsed && (
+                  <button
+                    type="button"
+                    onClick={() => handleOutOfMovesJokerRescue('center_bomb')}
+                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-300 text-white font-bold text-xs cursor-pointer transition-colors text-center"
+                  >
+                    💥 Ücretsiz Son Şans (Merkez 3×3 Temizle & Devam Et)
+                  </button>
+                )}
+              </div>
             )}
 
-            <div className="flex flex-col gap-2.5">
+            <div className="flex flex-col gap-2">
               <button
                 type="button"
                 data-start="true"
@@ -1309,20 +1645,20 @@ export default function App() {
                       ? Math.min(500, currentCampaignStage + 1)
                       : currentCampaignStage;
                   setCurrentCampaignStage(nextStage);
-                  startNewRun(gameMode, architecture, nextStage);
+                  startNewRun(gameMode, architecture, nextStage, true);
                 }}
-                className="w-full py-3 px-5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm cursor-pointer transition-colors"
+                className="w-full py-3 px-5 rounded-2xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-sm cursor-pointer transition-colors"
               >
                 {frozenSummary.outcome === 'victory' && gameMode === 'campaign'
-                  ? `Next Stage (Stage ${Math.min(500, currentCampaignStage + 1)})`
-                  : 'Play Again'}
+                  ? `Sonraki Bölüm (Bölüm ${Math.min(500, currentCampaignStage + 1)})`
+                  : '🔄 Tekrar Oyna (Perde Geçişi)'}
               </button>
               <button
                 type="button"
                 onClick={() => setShellState('title')}
-                className="w-full py-2.5 px-5 rounded-xl bg-[#07130F] hover:bg-[#0E241C] border border-[#1D4033] text-emerald-200/80 font-semibold text-xs cursor-pointer transition-colors"
+                className="w-full py-2.5 px-5 rounded-2xl bg-black/35 hover:bg-black/50 border border-white/15 text-blue-100/80 font-semibold text-xs cursor-pointer transition-colors"
               >
-                Return to Title Screen
+                🏠 Ana Ekrana Dön
               </button>
             </div>
           </div>
@@ -1339,12 +1675,12 @@ export default function App() {
         streakChests={streakChests}
         onClaimStreakChest={handleClaimStreakChest}
         onRecoverMissedDay={handleRecoverMissedDay}
-        onStartDailyPuzzle={() => startNewRun('daily', 'holed', currentCampaignStage)}
+        onStartDailyPuzzle={() => startNewRun('daily', 'holed', currentCampaignStage, true)}
         highestCampaignStage={highestCampaignStage}
         currentCampaignStage={currentCampaignStage}
         onSelectCampaignStage={(stageNumber) => {
           setCurrentCampaignStage(stageNumber);
-          startNewRun('campaign', getCampaignStageConfig(stageNumber).architecture, stageNumber);
+          startNewRun('campaign', getCampaignStageConfig(stageNumber).architecture, stageNumber, true);
         }}
         leagueCohort={leagueCohort}
         unlockedSkins={unlockedSkins}
@@ -1353,6 +1689,8 @@ export default function App() {
         claimedShopBundles={claimedShopBundles}
         onPurchaseBundle={handlePurchaseBundle}
         boosterStock={boosterStock}
+        onBuySingleBooster={handleBuySingleBooster}
+        onGrantFreeCoins={handleGrantFreeCoins}
       />
 
       {/* 7. GODOT 4.3+ PROJECT EXPORT STUDIO MODAL */}
@@ -1363,3 +1701,4 @@ export default function App() {
     </main>
   );
 }
+

@@ -10,6 +10,8 @@ import {
   getBoosterCoinCost,
   applyHammerBooster,
   applyBombBlastBooster,
+  applyLaserBooster,
+  convertPieceToSingleStar,
   getCampaignStageConfig,
   getProjectedClearLines,
   hasAnyValidMove,
@@ -219,4 +221,52 @@ test('buildGodotProjectZipBytes builds a valid PKZIP archive with all Godot 4 pr
   // Check PK\x05\x06 End of Central Directory signature at the end of the archive
   assert.equal(view.getUint32(zipBytes.byteLength - 22, true), 0x06054b50);
 });
+
+test('Pastel Blast merged mechanics: Cross-Laser booster, 1x1 Star converter, and Gem Star collection', () => {
+  const board = createBoard('standard');
+  board[3][2] = {
+    row: 3,
+    col: 2,
+    kind: 'normal',
+    color: 'ruby',
+    frozenLayers: 0,
+    bombTimer: 0,
+    hasGem: true,
+  };
+  board[5][4] = {
+    row: 5,
+    col: 4,
+    kind: 'normal',
+    color: 'sapphire',
+    frozenLayers: 0,
+    bombTimer: 0,
+    hasGem: true,
+  };
+
+  // Cross-Laser at (3, 4) clears row 3 and col 4 and collects both gems
+  const laserRes = applyLaserBooster(board, 3, 4);
+  assert.equal(laserRes.success, true);
+  assert.equal(laserRes.clearedCount, 2);
+  assert.equal(laserRes.gemsCollected, 2);
+  assert.equal(laserRes.board[3][2].kind, 'empty');
+  assert.equal(laserRes.board[5][4].kind, 'empty');
+
+  // 1x1 Star converter turns a multi-tile piece into a 1x1 gem star block
+  const bigPiece: TrayPiece = {
+    id: 'big1',
+    name: '3x3 Square',
+    matrix: [
+      [1, 1, 1],
+      [1, 1, 1],
+      [1, 1, 1],
+    ],
+    color: 'emerald',
+    modifiers: [],
+    used: false,
+  };
+  const starPiece = convertPieceToSingleStar(bigPiece);
+  assert.deepEqual(starPiece.matrix, [[1]]);
+  assert.equal(starPiece.modifiers[0]?.hasGem, true);
+});
+
 

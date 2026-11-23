@@ -272,6 +272,129 @@ class SoundSynth {
     });
   }
 
+  public bgmEnabled: boolean = false;
+  private bgmTimer: number | null = null;
+
+  public setBgm(enabled: boolean): void {
+    this.bgmEnabled = enabled;
+    if (this.bgmTimer !== null && typeof window !== 'undefined') {
+      window.clearInterval(this.bgmTimer);
+      this.bgmTimer = null;
+    }
+    if (!enabled || this.isMuted) return;
+    if (typeof window === 'undefined') return;
+    if (typeof navigator !== 'undefined' && navigator.webdriver) return;
+
+    const scale = [261.63, 293.66, 329.63, 392.0, 440.0, 523.25];
+    let step = 0;
+    this.bgmTimer = window.setInterval(() => {
+      if (!this.bgmEnabled || this.isMuted) return;
+      const ctx = this.ensureContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const freq = scale[(step * 2 + (step % 3)) % scale.length];
+      step++;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now);
+      gain.gain.setValueAtTime(0.025, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.46);
+    }, 520);
+  }
+
+  public playTick(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(760, now);
+    gain.gain.setValueAtTime(0.035, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.028);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.03);
+  }
+
+  public playCurtain(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const notes = [330, 392, 440, 523.25, 587.33, 659.25, 783.99, 880];
+    notes.forEach((f, i) => {
+      const t = now + i * 0.045;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(f, t);
+      gain.gain.setValueAtTime(0.055, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.085);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.09);
+    });
+  }
+
+  public playCoin(): void {
+    this.triggerHaptic(10);
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    [987.77, 1318.51].forEach((freq, i) => {
+      const t = now + i * 0.07;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.11, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.15);
+    });
+  }
+
+  public playLaser(): void {
+    this.triggerHaptic([18, 20, 30]);
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const sweep = ctx.createOscillator();
+    const sweepGain = ctx.createGain();
+    sweep.type = 'sawtooth';
+    sweep.frequency.setValueAtTime(920, now);
+    sweep.frequency.exponentialRampToValueAtTime(140, now + 0.22);
+    sweepGain.gain.setValueAtTime(0.14, now);
+    sweepGain.gain.exponentialRampToValueAtTime(0.001, now + 0.23);
+    sweep.connect(sweepGain);
+    sweepGain.connect(ctx.destination);
+    sweep.start(now);
+    sweep.stop(now + 0.24);
+
+    [523.25, 783.99, 1046.5].forEach((freq, i) => {
+      const t = now + i * 0.035;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.08, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.17);
+    });
+  }
+
   public playGameOver(): void {
     this.triggerHaptic([35, 50, 45]);
     const ctx = this.ensureContext();
@@ -294,3 +417,4 @@ class SoundSynth {
 }
 
 export const soundSynth = new SoundSynth();
+

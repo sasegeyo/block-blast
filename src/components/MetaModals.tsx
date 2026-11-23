@@ -41,6 +41,8 @@ interface MetaModalsProps {
   claimedShopBundles: string[];
   onPurchaseBundle: (bundle: ShopBundle) => void;
   boosterStock: Record<BoosterType, number>;
+  onBuySingleBooster?: (booster: BoosterType, costCoins: number) => void;
+  onGrantFreeCoins?: (amount: number) => void;
 }
 
 export const MetaModals: React.FC<MetaModalsProps> = ({
@@ -62,6 +64,9 @@ export const MetaModals: React.FC<MetaModalsProps> = ({
   onBuyOrEquipSkin,
   claimedShopBundles,
   onPurchaseBundle,
+  boosterStock,
+  onBuySingleBooster,
+  onGrantFreeCoins,
 }) => {
   const [selectedBiomePage, setSelectedBiomePage] = useState<number>(0); // 0..9 (50 stages per biome, 500 total)
   const [simulatingAdText, setSimulatingAdText] = useState<string | null>(null);
@@ -96,9 +101,9 @@ export const MetaModals: React.FC<MetaModalsProps> = ({
             <div>
               <h2 className="font-display text-xl font-bold tracking-wide text-amber-300">
                 {activeModal === 'daily' && 'Daily Relic Calendar & November Mosaic'}
-                {activeModal === 'campaign' && '500-Stage Odyssey Campaign Map'}
+                {activeModal === 'campaign' && '500-Stage Odyssey & Pastel Macera Map'}
                 {activeModal === 'league' && 'Weekly Gold II Cohort Leaderboard (30 Players)'}
-                {activeModal === 'shop' && 'Relic Sanctuary Shop & Block Skins'}
+                {activeModal === 'shop' && 'Pastel & Relic Market · Temalar & Jokerler'}
               </h2>
               <p className="text-xs text-emerald-200/75">
                 {activeModal === 'daily' &&
@@ -108,7 +113,7 @@ export const MetaModals: React.FC<MetaModalsProps> = ({
                 {activeModal === 'league' &&
                   'Resets Sunday Midnight (3d 09h 59m left) · Top 3 Win Promotion Chests · Ranks 24-30 Demote'}
                 {activeModal === 'shop' &&
-                  'Anti-Pay-to-Win Safeguard Active: Max 3 Booster Deployments per Session'}
+                  'Pastel Block Blast & Relic Temaları · 6 Taktiksel Joker Marketi'}
               </p>
             </div>
           </div>
@@ -517,13 +522,13 @@ export const MetaModals: React.FC<MetaModalsProps> = ({
             </div>
           )}
 
-          {/* 4. RELIC SHOP, SKINS & F2P REWARDED AD BUNDLES */}
+          {/* 4. RELIC & PASTEL SHOP: SKINS, JOKERS & F2P REWARDED AD BUNDLES */}
           {activeModal === 'shop' && (
             <div className="space-y-6">
-              {/* Cosmetics & Visual Block Skins */}
+              {/* Cosmetics & Visual Block Skins (Pastel Blast + Relic Themes) */}
               <div>
                 <h3 className="text-sm font-semibold text-amber-200 mb-3">
-                  Visual Block Skins & Sanctuary Themes (Live Canvas Transform)
+                  🎨 Görsel Temalar & Blok Setleri (Pastel Blast & Relic Koleksiyonu)
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
                   {Object.values(THEME_SKINS).map((skin) => {
@@ -558,7 +563,7 @@ export const MetaModals: React.FC<MetaModalsProps> = ({
                         <div className="mt-4">
                           {isEquipped ? (
                             <span className="text-xs font-bold text-amber-300">
-                              Equipped on Board
+                              ✓ Seçili Tema (Equipped)
                             </span>
                           ) : isUnlocked ? (
                             <button
@@ -566,7 +571,7 @@ export const MetaModals: React.FC<MetaModalsProps> = ({
                               onClick={() => onBuyOrEquipSkin(skin.id)}
                               className="w-full py-1.5 px-3 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition-colors cursor-pointer"
                             >
-                              Equip {skin.name}
+                              Seç ({skin.name})
                             </button>
                           ) : (
                             <button
@@ -574,7 +579,9 @@ export const MetaModals: React.FC<MetaModalsProps> = ({
                               onClick={() => onBuyOrEquipSkin(skin.id)}
                               className="w-full py-1.5 px-3 rounded bg-purple-700 hover:bg-purple-600 text-white font-semibold text-xs transition-colors cursor-pointer"
                             >
-                              Unlock Skin ({skin.costGems} Gems)
+                              {skin.costCoins
+                                ? `Aç (${skin.costCoins} Coin / ${skin.costGems} Gem)`
+                                : `Aç (${skin.costGems} Gems)`}
                             </button>
                           )}
                         </div>
@@ -584,10 +591,61 @@ export const MetaModals: React.FC<MetaModalsProps> = ({
                 </div>
               </div>
 
+              {/* Pastel Blast Individual Joker Market + Free +50 Coin Button */}
+              {onBuySingleBooster && (
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold text-amber-200">
+                      ⚡ Tekli Taktiksel Joker Satın Al (Stok Ekle)
+                    </h3>
+                    {onGrantFreeCoins && (
+                      <button
+                        type="button"
+                        onClick={() => onGrantFreeCoins(50)}
+                        className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer transition-colors"
+                      >
+                        🎁 +50 Coin Ücretsiz Bonus Al
+                      </button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {(
+                      [
+                        { type: 'reroll' as const, title: '↻ Yenile (Shuffle)', cost: 25 },
+                        { type: 'rotate' as const, title: '⟳ Döndür (Rotate)', cost: 20 },
+                        { type: 'hammer' as const, title: '🔨 Çekiç (Hammer)', cost: 30 },
+                        { type: 'bomb_blast' as const, title: '💥 3×3 Bomba', cost: 40 },
+                        { type: 'laser' as const, title: '⚡ Satır/Sütun Lazeri', cost: 45 },
+                        { type: 'single_star' as const, title: '✨ 1×1 Yıldız Blok', cost: 35 },
+                      ]
+                    ).map((j) => (
+                      <div
+                        key={j.type}
+                        className="p-3 rounded-lg bg-[#0E241C] border border-[#1D4033] flex flex-col justify-between gap-2"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-white">{j.title}</span>
+                          <span className="text-xs font-mono-tabular font-bold text-emerald-300">
+                            x{boosterStock[j.type] || 0}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onBuySingleBooster(j.type, j.cost)}
+                          className="w-full py-1.5 px-2.5 rounded bg-amber-500/90 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer transition-colors"
+                        >
+                          +1 Al (🪙 {j.cost})
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Booster Bundles, Value Starter Pack & F2P Daily Ad Chest */}
               <div>
                 <h3 className="text-sm font-semibold text-amber-200 mb-3">
-                  Booster Bundles, Starter Pack & F2P Daily Chest
+                  📦 Avantaj Paketleri & Günlük Ücretsiz Sandık
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {SHOP_BUNDLES.map((bundle) => {
@@ -644,3 +702,4 @@ export const MetaModals: React.FC<MetaModalsProps> = ({
     </div>
   );
 };
+
